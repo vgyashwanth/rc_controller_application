@@ -32,33 +32,34 @@ class ControlScreen extends StatefulWidget {
 
 class _ControlScreenState extends State<ControlScreen> {
   double _steeringAngle = 0.0; // In radians (-3 to 3)
-  double _throttleValue = 0.0; // -1.0 to 1.0
+  double _throttleRaw = 0.0;   // Internal: -1.0 to 1.0 (GUI)
+  double _throttleValue = 1500.0; // Output: 1000-2000 (ESP8266)
 
   // UDP SETTINGS (SAME AS HELLO APP)
   final String _espIP = '192.168.4.1';
   final int _udpPort = 8888;
   String _status = 'Connect to ESP32-AP WiFi first';
 
+  // Convert raw throttle (-1..1) to PWM (1000..2000)
+  double get throttlePWM => (_throttleRaw + 1.0) * 500 + 1000;
+
   // 🚀 UDP SEND FUNCTION (IDENTICAL TO HELLO APP)
   Future<void> _sendUDP() async {
     RawDatagramSocket? socket;
     try {
-      // CREATE NEW SOCKET (like Hello app)
       socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       
-      // FORMAT: "S:-1.23,T:0.45" (same parsing on ESP32)
-      String data = "S:${_steeringAngle.toStringAsFixed(2)},T:${_throttleValue.toStringAsFixed(2)}";
+      // FORMAT: "S:-1.23,T:1523" (T = 1000-2000)
+      String data = "S:${_steeringAngle.toStringAsFixed(2)},T:${throttlePWM.toStringAsFixed(0)}";
       final messageBytes = Uint8List.fromList(data.codeUnits);
       
-      // SEND UDP (EXACT Hello app method)
       int bytesSent = socket.send(messageBytes, InternetAddress(_espIP), _udpPort);
-      
-      print('UDP sent $bytesSent bytes: $data'); // Debug
+      print('UDP sent $bytesSent bytes: $data');
       
     } catch (e) {
       print('UDP Error: $e');
     } finally {
-      socket?.close(); // CLOSE SOCKET (like Hello app)
+      socket?.close();
     }
   }
 
@@ -68,7 +69,7 @@ class _ControlScreenState extends State<ControlScreen> {
       backgroundColor: const Color(0xff1d271d),
       body: Stack(
         children: [
-          // 1. TOP BAR (Status Info) - ADDED UDP STATUS
+          // 1. TOP BAR (Status Info) - UPDATED TO SHOW PWM
           Positioned(
             top: 15,
             left: 20,
@@ -76,7 +77,7 @@ class _ControlScreenState extends State<ControlScreen> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text("UDP: $_espIP:$_udpPort | S:${_steeringAngle.toStringAsFixed(1)} T:${_throttleValue.toStringAsFixed(1)}",
+                Text("UDP: $_espIP:$_udpPort | S:${_steeringAngle.toStringAsFixed(1)} T:${throttlePWM.toStringAsFixed(0)}",
                     style: const TextStyle(
                         color: Colors.greenAccent,
                         fontWeight: FontWeight.bold, fontSize: 12)),
@@ -96,7 +97,7 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 2. LEFT SIDE (Steering Wheel) - ADDED UDP SEND
+          // 2. LEFT SIDE (Steering Wheel) - UNCHANGED
           Positioned(
             bottom: 40,
             left: 60,
@@ -111,12 +112,10 @@ class _ControlScreenState extends State<ControlScreen> {
                       _steeringAngle += details.delta.dx / 50;
                       _steeringAngle = _steeringAngle.clamp(-3.0, 3.0);
                     });
-                    // 🚀 SEND UDP ON EVERY MOVE (Hello app method)
                     await _sendUDP();
                   },
                   onPanEnd: (_) async {
                     setState(() => _steeringAngle = 0.0);
-                    // 🚀 SEND UDP ON RELEASE
                     await _sendUDP();
                   },
                   child: Transform.rotate(
@@ -133,7 +132,7 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 3. RIGHT SIDE (Throttle Slider) - ADDED UDP SEND
+          // 3. RIGHT SIDE (Throttle Slider) - UNCHANGED GUI
           Positioned(
             bottom: 40,
             right: 60,
@@ -165,19 +164,21 @@ class _ControlScreenState extends State<ControlScreen> {
                     GestureDetector(
                       onVerticalDragUpdate: (details) async {
                         setState(() {
-                          _throttleValue -= details.delta.dy / 100;
-                          _throttleValue = _throttleValue.clamp(-1.0, 1.0);
+                          _throttleRaw -= details.delta.dy / 100;
+                          _throttleRaw = _throttleRaw.clamp(-1.0, 1.0);
+                          _throttleValue = throttlePWM;  // Update PWM
                         });
-                        // 🚀 SEND UDP ON EVERY MOVE (Hello app method)
                         await _sendUDP();
                       },
                       onVerticalDragEnd: (_) async {
-                        setState(() => _throttleValue = 0.0);
-                        // 🚀 SEND UDP ON RELEASE
+                        setState(() {
+                          _throttleRaw = 0.0;
+                          _throttleValue = 1500.0;
+                        });
                         await _sendUDP();
                       },
                       child: Container(
-                        height: 200,
+                        height: 209,
                         width: 55,
                         decoration: BoxDecoration(
                           color: Colors.black45,
@@ -186,29 +187,29 @@ class _ControlScreenState extends State<ControlScreen> {
                         child: Stack(
                           alignment: Alignment.center,
                           children: [
-                            // Fill Bar logic
+                            // Fill Bar logic - UNCHANGED
                             Positioned(
-                              bottom: _throttleValue >= 0
+                              bottom: _throttleRaw >= 0
                                   ? 100
-                                  : 100 + (_throttleValue * 100),
+                                  : 100 + (_throttleRaw * 100),
                               child: Container(
                                 width: 55,
-                                height: (_throttleValue.abs() * 100),
-                                color: _throttleValue >= 0
+                                height: (_throttleRaw.abs() * 100),
+                                color: _throttleRaw >= 0
                                     ? Colors.greenAccent.withOpacity(0.4)
                                     : Colors.redAccent.withOpacity(0.4),
                               ),
                             ),
                             Container(
                                 height: 2, width: 55, color: Colors.white38),
-                            // Rectangular Handle
+                            // Rectangular Handle - UNCHANGED
                             Positioned(
-                              bottom: 87.5 + (_throttleValue * 87.5),
+                              bottom: 87.5 + (_throttleRaw * 87.5),
                               child: Container(
                                 width: 51,
                                 height: 30,
                                 decoration: BoxDecoration(
-                                  color: _throttleValue >= 0
+                                  color: _throttleRaw >= 0
                                       ? Colors.greenAccent
                                       : Colors.redAccent,
                                   border: Border.all(color: Colors.black26),
