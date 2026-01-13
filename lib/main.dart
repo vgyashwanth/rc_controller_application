@@ -1,5 +1,5 @@
 import 'dart:io';
-import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -31,33 +31,27 @@ class ControlScreen extends StatefulWidget {
 }
 
 class _ControlScreenState extends State<ControlScreen> {
-  double _steeringAngle = 0.0; // In radians (-3 to 3)
-  double _throttleRaw = 0.0;   // Internal: -1.0 to 1.0 (GUI)
-  double _throttleValue = 1500.0; // Output: 1000-2000 (ESP8266)
-
-  // UDP SETTINGS (SAME AS HELLO APP)
+  double _steeringAngle = 0.0; 
+  double _throttleRaw = 0.0;   
+  
   final String _espIP = '192.168.4.1';
   final int _udpPort = 8888;
-  String _status = 'Connect to ESP32-AP WiFi first';
 
-  // Convert raw throttle (-1..1) to PWM (1000..2000)
+  // PWM Calculation (1000 - 2000)
   double get throttlePWM => (_throttleRaw + 1.0) * 500 + 1000;
 
-  // 🚀 UDP SEND FUNCTION (IDENTICAL TO HELLO APP)
+  // Speed Calculation (0 - 120) 
+  double get displaySpeed => ((throttlePWM - 1500).abs() / 500) * 120;
+
   Future<void> _sendUDP() async {
     RawDatagramSocket? socket;
     try {
       socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      
-      // FORMAT: "S:-1.23,T:1523" (T = 1000-2000)
       String data = "S:${_steeringAngle.toStringAsFixed(2)},T:${throttlePWM.toStringAsFixed(0)}";
       final messageBytes = Uint8List.fromList(data.codeUnits);
-      
-      int bytesSent = socket.send(messageBytes, InternetAddress(_espIP), _udpPort);
-      print('UDP sent $bytesSent bytes: $data');
-      
+      socket.send(messageBytes, InternetAddress(_espIP), _udpPort);
     } catch (e) {
-      print('UDP Error: $e');
+      debugPrint('UDP Error: $e');
     } finally {
       socket?.close();
     }
@@ -66,50 +60,89 @@ class _ControlScreenState extends State<ControlScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xff1d271d),
+      backgroundColor: const Color(0xff1d271d), 
       body: Stack(
         children: [
-          // 1. TOP BAR (Status Info) - UPDATED TO SHOW PWM
+          // 1. TOP INFO BAR (Centered)
           Positioned(
-            top: 15,
-            left: 20,
-            right: 20,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text("UDP: $_espIP:$_udpPort | S:${_steeringAngle.toStringAsFixed(1)} T:${throttlePWM.toStringAsFixed(0)}",
-                    style: const TextStyle(
-                        color: Colors.greenAccent,
-                        fontWeight: FontWeight.bold, fontSize: 12)),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
-                  color: Colors.yellow,
-                  child: const Text("KILL SWITCH",
-                      style: TextStyle(
-                          color: Colors.black, fontWeight: FontWeight.w900)),
+            top: 20,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.black26,
+                  borderRadius: BorderRadius.circular(20),
                 ),
-                const CircleAvatar(
-                    backgroundColor: Colors.red,
-                    radius: 20,
-                    child: Text("STOP",
-                        style: TextStyle(fontSize: 10, color: Colors.white))),
+                child: Text(
+                  "UDP: $_espIP:$_udpPort  |  S:${_steeringAngle.toStringAsFixed(1)}  T:${throttlePWM.toStringAsFixed(0)}",
+                  style: const TextStyle(
+                      color: Colors.greenAccent,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12),
+                ),
+              ),
+            ),
+          ),
+
+          // 2. CENTERED SPEEDOMETER
+          Positioned(
+            bottom: 20,
+            left: 0,
+            right: 0,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Stack(
+                  alignment: Alignment.bottomCenter,
+                  children: [
+                    CustomPaint(
+                      size: const Size(160, 80), // Smaller, tighter semi-circle
+                      painter: SpeedometerPainter(displaySpeed),
+                    ),
+                    // Digital readout placed inside the semi-circle but lower
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            displaySpeed.toStringAsFixed(0),
+                            style: TextStyle(
+                                fontSize: 34,
+                                fontWeight: FontWeight.w900, // Fixed 'black' error
+                                color: displaySpeed > 90 ? Colors.redAccent : Colors.white),
+                          ),
+                          Text(
+                            "M/H",
+                            style: TextStyle(
+                              color: displaySpeed > 90 ? Colors.redAccent : Colors.white54,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
 
-          // 2. LEFT SIDE (Steering Wheel) - UNCHANGED
+          // 3. STEERING WHEEL (LEFT)
           Positioned(
-            bottom: 40,
-            left: 60,
+            bottom: 30,
+            left: 70,
             child: Column(
               children: [
-                const Text("STEERING",
-                    style: TextStyle(color: Colors.white54, letterSpacing: 1.5)),
-                const SizedBox(height: 15),
+                const Text("STEERING", style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 10),
                 GestureDetector(
                   onPanUpdate: (details) async {
                     setState(() {
-                      _steeringAngle += details.delta.dx / 50;
+                      _steeringAngle += details.delta.dx / 60;
                       _steeringAngle = _steeringAngle.clamp(-3.0, 3.0);
                     });
                     await _sendUDP();
@@ -121,10 +154,9 @@ class _ControlScreenState extends State<ControlScreen> {
                   child: Transform.rotate(
                     angle: _steeringAngle,
                     child: SizedBox(
-                      width: 200,
-                      height: 200,
-                      child: Image.asset('images/steering_wheel.png',
-                          fit: BoxFit.contain),
+                      width: 180,
+                      height: 180,
+                      child: Image.asset('images/steering_wheel.png', fit: BoxFit.contain),
                     ),
                   ),
                 ),
@@ -132,32 +164,22 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 3. RIGHT SIDE (Throttle Slider) - UNCHANGED GUI
+          // 4. THROTTLE CONTROL (RIGHT)
           Positioned(
-            bottom: 40,
-            right: 60,
+            bottom: 30,
+            right: 80,
             child: Column(
               children: [
-                const Text("THROTTLE",
-                    style: TextStyle(
-                        color: Colors.white54, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 15),
+                const Text(" THROTTLE", style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 10),
                 Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Column(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: const [
-                        Text("F",
-                            style: TextStyle(
-                                color: Colors.greenAccent,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold)),
+                    const Column(
+                      children: [
+                        Text("F", style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold)),
                         SizedBox(height: 140),
-                        Text("R",
-                            style: TextStyle(
-                                color: Colors.redAccent,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold)),
+                        Text("R", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
                       ],
                     ),
                     const SizedBox(width: 15),
@@ -166,56 +188,45 @@ class _ControlScreenState extends State<ControlScreen> {
                         setState(() {
                           _throttleRaw -= details.delta.dy / 100;
                           _throttleRaw = _throttleRaw.clamp(-1.0, 1.0);
-                          _throttleValue = throttlePWM;  // Update PWM
                         });
                         await _sendUDP();
                       },
                       onVerticalDragEnd: (_) async {
-                        setState(() {
-                          _throttleRaw = 0.0;
-                          _throttleValue = 1500.0;
-                        });
+                        setState(() => _throttleRaw = 0.0);
                         await _sendUDP();
                       },
                       child: Container(
-                        height: 209,
-                        width: 55,
+                        height: 205,
+                        width: 50,
                         decoration: BoxDecoration(
-                          color: Colors.black45,
-                          border: Border.all(color: Colors.white24, width: 2),
+                          color: Colors.black38,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.white10, width: 2),
                         ),
                         child: Stack(
                           alignment: Alignment.center,
                           children: [
-                            // Fill Bar logic - UNCHANGED
                             Positioned(
-                              bottom: _throttleRaw >= 0
-                                  ? 100
-                                  : 100 + (_throttleRaw * 100),
+                              bottom: _throttleRaw >= 0 ? 100 : 100 + (_throttleRaw * 100),
                               child: Container(
-                                width: 55,
+                                width: 50,
                                 height: (_throttleRaw.abs() * 100),
-                                color: _throttleRaw >= 0
-                                    ? Colors.greenAccent.withOpacity(0.4)
-                                    : Colors.redAccent.withOpacity(0.4),
+                                color: _throttleRaw >= 0 
+                                    ? Colors.greenAccent.withOpacity(0.3) 
+                                    : Colors.redAccent.withOpacity(0.3),
                               ),
                             ),
-                            Container(
-                                height: 2, width: 55, color: Colors.white38),
-                            // Rectangular Handle - UNCHANGED
+                            Container(height: 1, width: 50, color: Colors.white24),
                             Positioned(
-                              bottom: 87.5 + (_throttleRaw * 87.5),
+                              bottom: 85 + (_throttleRaw * 85),
                               child: Container(
-                                width: 51,
+                                width: 46,
                                 height: 30,
                                 decoration: BoxDecoration(
-                                  color: _throttleRaw >= 0
-                                      ? Colors.greenAccent
-                                      : Colors.redAccent,
-                                  border: Border.all(color: Colors.black26),
+                                  color: _throttleRaw >= 0 ? Colors.greenAccent : Colors.redAccent,
+                                  borderRadius: BorderRadius.circular(4),
                                 ),
-                                child: const Icon(Icons.unfold_more,
-                                    color: Colors.black54),
+                                child: const Icon(Icons.unfold_more, color: Colors.black87),
                               ),
                             ),
                           ],
@@ -231,4 +242,42 @@ class _ControlScreenState extends State<ControlScreen> {
       ),
     );
   }
+}
+
+class SpeedometerPainter extends CustomPainter {
+  final double speed;
+  SpeedometerPainter(this.speed);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // The center is the bottom-middle of the provided size
+    final center = Offset(size.width / 2, size.height);
+    // Radius slightly larger than height to make a nice arc
+    final radius = size.width * 0.5;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+
+    // 1. Background (Empty) Arc
+    final trackPaint = Paint()
+      ..color = Colors.white.withOpacity(0.1)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10
+      ..strokeCap = StrokeCap.round;
+
+    // Starts at 180 degrees (pi), spans 180 degrees (pi)
+    canvas.drawArc(rect, pi, pi, false, trackPaint);
+
+    // 2. Active Speed Arc
+    final progressPaint = Paint()
+      ..color = speed > 90 ? Colors.redAccent : Colors.greenAccent
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10
+      ..strokeCap = StrokeCap.round;
+
+    // Map 0-120 speed to 0-pi radians
+    double sweepAngle = (speed / 120) * pi;
+    canvas.drawArc(rect, pi, sweepAngle, false, progressPaint);
+  }
+
+  @override
+  bool shouldRepaint(SpeedometerPainter oldDelegate) => oldDelegate.speed != speed;
 }
