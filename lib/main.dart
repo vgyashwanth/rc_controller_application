@@ -34,13 +34,13 @@ class _ControlScreenState extends State<ControlScreen> {
   double _steeringAngle = 0.0; 
   double _throttleRaw = 0.0;   
   
-  final String _espIP = '192.168.4.1';
+  // CHANGED: Phone hotspot IP
+  final String _espIP = '192.168.196.77';  // PHONE HOTSPOT IP
   final int _udpPort = 8888;
+  bool _isConnected = false;  // NEW: Connection status
 
   // PWM Calculation (1000 - 2000)
   double get throttlePWM => (_throttleRaw + 1.0) * 500 + 1000;
-
-  // Speed Calculation (0 - 120) 
   double get displaySpeed => ((throttlePWM - 1500).abs() / 500) * 120;
 
   Future<void> _sendUDP() async {
@@ -49,9 +49,17 @@ class _ControlScreenState extends State<ControlScreen> {
       socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       String data = "S:${_steeringAngle.toStringAsFixed(2)},T:${throttlePWM.toStringAsFixed(0)}";
       final messageBytes = Uint8List.fromList(data.codeUnits);
-      socket.send(messageBytes, InternetAddress(_espIP), _udpPort);
+      int bytesSent = socket.send(messageBytes, InternetAddress(_espIP), _udpPort);
+      
+      // Connection acknowledgment
+      if (bytesSent > 0) {
+        if (!_isConnected) {
+          setState(() => _isConnected = true);
+        }
+      }
     } catch (e) {
       debugPrint('UDP Error: $e');
+      setState(() => _isConnected = false);
     } finally {
       socket?.close();
     }
@@ -63,7 +71,7 @@ class _ControlScreenState extends State<ControlScreen> {
       backgroundColor: const Color(0xff1d271d), 
       body: Stack(
         children: [
-          // 1. TOP INFO BAR (Centered)
+          // 1. TOP INFO BAR (Added connection status)
           Positioned(
             top: 20,
             left: 0,
@@ -72,21 +80,28 @@ class _ControlScreenState extends State<ControlScreen> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 6),
                 decoration: BoxDecoration(
-                  color: Colors.black26,
+                  color: _isConnected ? Colors.green.withOpacity(0.3) : Colors.red.withOpacity(0.3),
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: Text(
-                  "UDP: $_espIP:$_udpPort  |  S:${_steeringAngle.toStringAsFixed(1)}  T:${throttlePWM.toStringAsFixed(0)}",
-                  style: const TextStyle(
-                      color: Colors.greenAccent,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(_isConnected ? Icons.wifi : Icons.wifi_off, size: 14, color: Colors.white),
+                    const SizedBox(width: 5),
+                    Text(
+                      "${_isConnected ? "CONN" : "DISCONN"} UDP:$_espIP:$_udpPort | S:${_steeringAngle.toStringAsFixed(1)} T:${throttlePWM.toStringAsFixed(0)}",
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12),
+                    ),
+                  ],
                 ),
               ),
             ),
           ),
 
-          // 2. CENTERED SPEEDOMETER
+          // 2. CENTERED SPEEDOMETER (UNCHANGED)
           Positioned(
             bottom: 20,
             left: 0,
@@ -98,10 +113,9 @@ class _ControlScreenState extends State<ControlScreen> {
                   alignment: Alignment.bottomCenter,
                   children: [
                     CustomPaint(
-                      size: const Size(160, 80), // Smaller, tighter semi-circle
+                      size: const Size(160, 80),
                       painter: SpeedometerPainter(displaySpeed),
                     ),
-                    // Digital readout placed inside the semi-circle but lower
                     Padding(
                       padding: const EdgeInsets.only(bottom: 5),
                       child: Column(
@@ -111,16 +125,15 @@ class _ControlScreenState extends State<ControlScreen> {
                             displaySpeed.toStringAsFixed(0),
                             style: TextStyle(
                                 fontSize: 34,
-                                fontWeight: FontWeight.w900, // Fixed 'black' error
+                                fontWeight: FontWeight.w900,
                                 color: displaySpeed > 90 ? Colors.redAccent : Colors.white),
                           ),
                           Text(
                             "M/H",
                             style: TextStyle(
-                              color: displaySpeed > 90 ? Colors.redAccent : Colors.white54,
-                              fontSize: 10,
-                              fontWeight: FontWeight.bold,
-                            ),
+                                color: displaySpeed > 90 ? Colors.redAccent : Colors.white54,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold),
                           ),
                         ],
                       ),
@@ -131,7 +144,7 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 3. STEERING WHEEL (LEFT)
+          // 3. STEERING WHEEL (LEFT) - UNCHANGED
           Positioned(
             bottom: 30,
             left: 70,
@@ -164,7 +177,7 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 4. THROTTLE CONTROL (RIGHT)
+          // 4. THROTTLE CONTROL (RIGHT) - UNCHANGED
           Positioned(
             bottom: 30,
             right: 80,
@@ -244,36 +257,30 @@ class _ControlScreenState extends State<ControlScreen> {
   }
 }
 
+// SpeedometerPainter (UNCHANGED)
 class SpeedometerPainter extends CustomPainter {
   final double speed;
   SpeedometerPainter(this.speed);
 
   @override
   void paint(Canvas canvas, Size size) {
-    // The center is the bottom-middle of the provided size
     final center = Offset(size.width / 2, size.height);
-    // Radius slightly larger than height to make a nice arc
     final radius = size.width * 0.5;
     final rect = Rect.fromCircle(center: center, radius: radius);
 
-    // 1. Background (Empty) Arc
     final trackPaint = Paint()
       ..color = Colors.white.withOpacity(0.1)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 10
       ..strokeCap = StrokeCap.round;
-
-    // Starts at 180 degrees (pi), spans 180 degrees (pi)
     canvas.drawArc(rect, pi, pi, false, trackPaint);
 
-    // 2. Active Speed Arc
     final progressPaint = Paint()
       ..color = speed > 90 ? Colors.redAccent : Colors.greenAccent
       ..style = PaintingStyle.stroke
       ..strokeWidth = 10
       ..strokeCap = StrokeCap.round;
-
-    // Map 0-120 speed to 0-pi radians
+    
     double sweepAngle = (speed / 120) * pi;
     canvas.drawArc(rect, pi, sweepAngle, false, progressPaint);
   }

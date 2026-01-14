@@ -1,37 +1,38 @@
-#include <ESP8266WiFi.h> // replace <ESP8266WiFi.h> with <WiFi.h> for ESP32
+#include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 
-const char* ssid = "ESP8266-AP";
-const char* password = "12345678";
+const char* ssid = "Galaxy M51A0C4";
+const char* password = "VGyk@#2002";
 
 WiFiUDP udp;
-const int udpPort = 8888;
 char packetBuffer[255];
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  Serial.println("=== ESP32 UDP FAST Server ===");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
   
-  WiFi.softAP(ssid, password);
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("AP IP: ");
-  Serial.println(IP);
-  Serial.printf("UDP listening on port %d\n\n", udpPort);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
   
-  udp.begin(udpPort);
-  Serial.println("UDP server ready! (50x faster than HTTP)");
+  Serial.println("\n✅ WiFi OK");
+  Serial.print("ESP IP: "); Serial.println(WiFi.localIP());
+  Serial.print("GATEWAY: "); Serial.println(WiFi.gatewayIP());  // PHONE IP!
+  
+  udp.begin(8888);
+  Serial.println("🔍 LISTENING 8888 - MOVE THROTTLE NOW!");
+  Serial.println("📱 Flutter IP must = ESP IP above!");
 }
 
 void loop() {
-  int packetSize = udp.parsePacket();
-  
-  if (packetSize) {
+
+  // UDP Check
+  int size = udp.parsePacket();
+  if (size) {
     int len = udp.read(packetBuffer, 255);
-    if (len > 0) {
-      packetBuffer[len] = 0;
-      Serial.printf("🚀 UDP HELLO #%d: '%s' (%d bytes)\n", 
-                    millis()/1000, packetBuffer, len);
-    }
+    packetBuffer[len] = 0;
+    Serial.printf("🎉 UDP %d bytes: %s\n", len, packetBuffer);
   }
 }
