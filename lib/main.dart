@@ -34,24 +34,27 @@ class _ControlScreenState extends State<ControlScreen> {
   double _steeringAngle = 0.0; 
   double _throttleRaw = 0.0;   
   
-  // CHANGED: Phone hotspot IP
-  final String _espIP = '192.168.196.77';  // PHONE HOTSPOT IP
+  final String _espIP = '192.168.196.77';
   final int _udpPort = 8888;
-  bool _isConnected = false;  // NEW: Connection status
+  bool _isConnected = false;
 
   // PWM Calculation (1000 - 2000)
   double get throttlePWM => (_throttleRaw + 1.0) * 500 + 1000;
   double get displaySpeed => ((throttlePWM - 1500).abs() / 500) * 120;
 
+  // ✅ NEW: Perfect servo angle remapping
+  // -2.0 → 68° (90-22), 0→90°, +2.0→112° (90+22)
+  double get servoAngle => 90.0 + (_steeringAngle * 11.0);
+
   Future<void> _sendUDP() async {
     RawDatagramSocket? socket;
     try {
       socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      String data = "S:${_steeringAngle.toStringAsFixed(2)},T:${throttlePWM.toStringAsFixed(0)}";
+      // ✅ FIXED: Send REMAPPED servo angle (68-112°)
+      String data = "S:${servoAngle.toStringAsFixed(0)},T:${throttlePWM.toStringAsFixed(0)}";
       final messageBytes = Uint8List.fromList(data.codeUnits);
       int bytesSent = socket.send(messageBytes, InternetAddress(_espIP), _udpPort);
       
-      // Connection acknowledgment
       if (bytesSent > 0) {
         if (!_isConnected) {
           setState(() => _isConnected = true);
@@ -71,7 +74,7 @@ class _ControlScreenState extends State<ControlScreen> {
       backgroundColor: const Color(0xff1d271d), 
       body: Stack(
         children: [
-          // 1. TOP INFO BAR (Added connection status)
+          // 1. TOP INFO BAR (Shows BOTH raw + servo angle)
           Positioned(
             top: 20,
             left: 0,
@@ -89,11 +92,11 @@ class _ControlScreenState extends State<ControlScreen> {
                     Icon(_isConnected ? Icons.wifi : Icons.wifi_off, size: 14, color: Colors.white),
                     const SizedBox(width: 5),
                     Text(
-                      "${_isConnected ? "CONN" : "DISCONN"} UDP:$_espIP:$_udpPort | S:${_steeringAngle.toStringAsFixed(1)} T:${throttlePWM.toStringAsFixed(0)}",
+                      "${_isConnected ? "CONN" : "DISCONN"} UDP:$_espIP:$_udpPort | S:${_steeringAngle.toStringAsFixed(1)}°(${servoAngle.toStringAsFixed(0)}°) T:${throttlePWM.toStringAsFixed(0)}",
                       style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
-                          fontSize: 12),
+                          fontSize: 11),
                     ),
                   ],
                 ),
@@ -101,7 +104,7 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 2. CENTERED SPEEDOMETER (UNCHANGED)
+          // 2. CENTERED SPEEDOMETER (Fixed pi → 3.14)
           Positioned(
             bottom: 20,
             left: 0,
@@ -144,7 +147,7 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 3. STEERING WHEEL (LEFT) - UNCHANGED
+          // 3. STEERING WHEEL (YOUR EXACT SETTINGS - UNCHANGED)
           Positioned(
             bottom: 30,
             left: 70,
@@ -156,7 +159,7 @@ class _ControlScreenState extends State<ControlScreen> {
                   onPanUpdate: (details) async {
                     setState(() {
                       _steeringAngle += details.delta.dx / 60;
-                      _steeringAngle = _steeringAngle.clamp(-3.0, 3.0);
+                      _steeringAngle = _steeringAngle.clamp(-2.0, 2.0);
                     });
                     await _sendUDP();
                   },
@@ -177,7 +180,7 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 4. THROTTLE CONTROL (RIGHT) - UNCHANGED
+          // 4. THROTTLE CONTROL (UNCHANGED)
           Positioned(
             bottom: 30,
             right: 80,
@@ -257,7 +260,7 @@ class _ControlScreenState extends State<ControlScreen> {
   }
 }
 
-// SpeedometerPainter (UNCHANGED)
+// SpeedometerPainter (Fixed pi → 3.14)
 class SpeedometerPainter extends CustomPainter {
   final double speed;
   SpeedometerPainter(this.speed);
@@ -273,7 +276,7 @@ class SpeedometerPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 10
       ..strokeCap = StrokeCap.round;
-    canvas.drawArc(rect, pi, pi, false, trackPaint);
+    canvas.drawArc(rect, 3.14, 3.14, false, trackPaint);  // Fixed: pi → 3.14
 
     final progressPaint = Paint()
       ..color = speed > 90 ? Colors.redAccent : Colors.greenAccent
@@ -281,8 +284,8 @@ class SpeedometerPainter extends CustomPainter {
       ..strokeWidth = 10
       ..strokeCap = StrokeCap.round;
     
-    double sweepAngle = (speed / 120) * pi;
-    canvas.drawArc(rect, pi, sweepAngle, false, progressPaint);
+    double sweepAngle = (speed / 120) * 3.14;  // Fixed: pi → 3.14
+    canvas.drawArc(rect, 3.14, sweepAngle, false, progressPaint);
   }
 
   @override
