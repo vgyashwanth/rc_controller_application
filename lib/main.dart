@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,24 +35,53 @@ class _ControlScreenState extends State<ControlScreen> {
   double _steeringAngle = 0.0; 
   double _throttleRaw = 0.0;   
   
+  bool _showTrimSlider = false;
+  double _trimValue = 0.0; 
+
   final String _espIP = '192.168.196.77';
   final int _udpPort = 8888;
   bool _isConnected = false;
 
-  // PWM Calculation (1000 - 2000)
+  @override
+  void initState() {
+    super.initState();
+    _loadTrimValue();
+  }
+
+  Future<void> _loadTrimValue() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _trimValue = prefs.getDouble('steering_trim') ?? 0.0;
+    });
+  }
+
+  Future<void> _saveTrimValue(double value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('steering_trim', value);
+  }
+
   double get throttlePWM => (_throttleRaw + 1.0) * 500 + 1000;
   double get displaySpeed => ((throttlePWM - 1500).abs() / 500) * 120;
 
-  // ✅ NEW: Perfect servo angle remapping
-  // -2.0 → 68° (90-22), 0→90°, +2.0→112° (90+22)
-  double get servoAngle => 90.0 + (_steeringAngle * 11.0);
+  double get servoAngle {
+    double center = 90.0 + _trimValue;
+    const double minLimit = 68.0;
+    const double maxLimit = 112.0;
+
+    double normalizedStick = (_steeringAngle / 2.0).clamp(-1.0, 1.0);
+
+    if (normalizedStick < 0) {
+      return center + (normalizedStick * (center - minLimit));
+    } else {
+      return center + (normalizedStick * (maxLimit - center));
+    }
+  }
 
   Future<void> _sendUDP() async {
     RawDatagramSocket? socket;
     try {
       socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      // ✅ FIXED: Send REMAPPED servo angle (68-112°)
-      String data = "S:${servoAngle.toStringAsFixed(0)},T:${throttlePWM.toStringAsFixed(0)}";
+      String data = "S:${servoAngle.toStringAsFixed(1)},T:${throttlePWM.toStringAsFixed(0)}";
       final messageBytes = Uint8List.fromList(data.codeUnits);
       int bytesSent = socket.send(messageBytes, InternetAddress(_espIP), _udpPort);
       
@@ -74,7 +104,7 @@ class _ControlScreenState extends State<ControlScreen> {
       backgroundColor: const Color(0xff1d271d), 
       body: Stack(
         children: [
-          // 1. TOP INFO BAR (Shows BOTH raw + servo angle)
+          // 1. TOP INFO BAR
           Positioned(
             top: 20,
             left: 0,
@@ -87,24 +117,102 @@ class _ControlScreenState extends State<ControlScreen> {
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(_isConnected ? Icons.wifi : Icons.wifi_off, size: 14, color: Colors.white),
-                    const SizedBox(width: 5),
-                    Text(
-                      "${_isConnected ? "CONN" : "DISCONN"} UDP:$_espIP:$_udpPort | S:${_steeringAngle.toStringAsFixed(1)}°(${servoAngle.toStringAsFixed(0)}°) T:${throttlePWM.toStringAsFixed(0)}",
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 11),
-                    ),
-                  ],
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(_isConnected ? Icons.wifi : Icons.wifi_off, size: 14, color: Colors.white),
+                  const SizedBox(width: 8), // Slightly more breathing room
+                  Text(
+                    "STEER: ${servoAngle.toStringAsFixed(1)}° | THROTTLE: ${throttlePWM.toStringAsFixed(0)}",
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 11),
+                  ),
+                ],
+              ),
+              ),
+            ),
+          ),
+
+          // TRIM BUTTON
+          Positioned(
+            top: 40,
+            right: 30,
+            child: GestureDetector(
+              onTap: () {
+                setState(() {
+                  _showTrimSlider = !_showTrimSlider;
+                });
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                decoration: BoxDecoration(
+                  color: _showTrimSlider ? Colors.greenAccent.withOpacity(0.2) : Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: _showTrimSlider ? Colors.greenAccent : Colors.white24, 
+                    width: 1.5
+                  ),
+                ),
+                child: Text(
+                  "TRIM",
+                  style: TextStyle(
+                    color: _showTrimSlider ? Colors.greenAccent : Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 14,
+                    letterSpacing: 1.2,
+                  ),
                 ),
               ),
             ),
           ),
 
-          // 2. CENTERED SPEEDOMETER (Fixed pi → 3.14)
+          if (_showTrimSlider)
+            Center(
+              child: Container(
+                width: 320,
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.8),
+                  borderRadius: BorderRadius.circular(15),
+                  border: Border.all(color: Colors.white10),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text("STEERING TRIM", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        const Text("-15", style: TextStyle(fontSize: 10)),
+                        Expanded(
+                          child: Slider(
+                            value: _trimValue,
+                            min: -15,
+                            max: 15,
+                            divisions: 300, // ✅ Changed from 60 to 300 for 0.1 degree steps
+                            activeColor: Colors.greenAccent,
+                            label: _trimValue.toStringAsFixed(1),
+                            onChanged: (val) {
+                              setState(() => _trimValue = val);
+                              _saveTrimValue(val);
+                              _sendUDP();
+                            },
+                          ),
+                        ),
+                        const Text("+15", style: TextStyle(fontSize: 10)),
+                      ],
+                    ),
+                    Text(
+                      "Current Offset: ${_trimValue > 0 ? '+' : ''}${_trimValue.toStringAsFixed(1)}°",
+                      style: const TextStyle(color: Colors.greenAccent, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // 2. CENTERED SPEEDOMETER
           Positioned(
             bottom: 20,
             left: 0,
@@ -147,7 +255,7 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 3. STEERING WHEEL (YOUR EXACT SETTINGS - UNCHANGED)
+          // 3. STEERING WHEEL
           Positioned(
             bottom: 30,
             left: 70,
@@ -180,7 +288,7 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 4. THROTTLE CONTROL (UNCHANGED)
+          // 4. THROTTLE CONTROL
           Positioned(
             bottom: 30,
             right: 80,
@@ -260,7 +368,6 @@ class _ControlScreenState extends State<ControlScreen> {
   }
 }
 
-// SpeedometerPainter (Fixed pi → 3.14)
 class SpeedometerPainter extends CustomPainter {
   final double speed;
   SpeedometerPainter(this.speed);
@@ -276,7 +383,7 @@ class SpeedometerPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 10
       ..strokeCap = StrokeCap.round;
-    canvas.drawArc(rect, 3.14, 3.14, false, trackPaint);  // Fixed: pi → 3.14
+    canvas.drawArc(rect, 3.14, 3.14, false, trackPaint); 
 
     final progressPaint = Paint()
       ..color = speed > 90 ? Colors.redAccent : Colors.greenAccent
@@ -284,7 +391,7 @@ class SpeedometerPainter extends CustomPainter {
       ..strokeWidth = 10
       ..strokeCap = StrokeCap.round;
     
-    double sweepAngle = (speed / 120) * 3.14;  // Fixed: pi → 3.14
+    double sweepAngle = (speed / 120) * 3.14;  
     canvas.drawArc(rect, 3.14, sweepAngle, false, progressPaint);
   }
 

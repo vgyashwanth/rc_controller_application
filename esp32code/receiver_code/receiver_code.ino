@@ -1,4 +1,4 @@
-#include <ESP8266WiFi.h>
+#include <ESP8266WiFi.h> // replace with ESP32WiFi.h for ESP32 rest everything is same.
 #include <WiFiUdp.h>
 
 const char* ssid = "Galaxy M51A0C4";
