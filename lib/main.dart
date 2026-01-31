@@ -32,12 +32,17 @@ class ControlScreen extends StatefulWidget {
 }
 
 class _ControlScreenState extends State<ControlScreen> {
-  double _steeringAngle = 0.0; 
-  double _throttleRaw = 0.0;   
-  
-  bool _showTrimSlider = false;
-  double _trimValue = 0.0; 
+  // Control Variables
+  double _steeringAngle = 0.0;
+  double _throttleRaw = 0.0;
+  double _trimValue = 0.0;
 
+  // Toggle States
+  bool _showTrimSlider = false;
+  int _headlightStage = 0; // 0: Off, 1: Blue, 2: Yellow
+  bool _parkingLightsOn = false;
+
+  // Connection Info
   final String _espIP = '192.168.196.77';
   final int _udpPort = 8888;
   bool _isConnected = false;
@@ -48,6 +53,7 @@ class _ControlScreenState extends State<ControlScreen> {
     _loadTrimValue();
   }
 
+  // --- Persistence ---
   Future<void> _loadTrimValue() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
@@ -60,6 +66,7 @@ class _ControlScreenState extends State<ControlScreen> {
     await prefs.setDouble('steering_trim', value);
   }
 
+  // --- Logic ---
   double get throttlePWM => (_throttleRaw + 1.0) * 500 + 1000;
   double get displaySpeed => ((throttlePWM - 1500).abs() / 500) * 120;
 
@@ -67,7 +74,6 @@ class _ControlScreenState extends State<ControlScreen> {
     double center = 90.0 + _trimValue;
     const double minLimit = 68.0;
     const double maxLimit = 112.0;
-
     double normalizedStick = (_steeringAngle / 2.0).clamp(-1.0, 1.0);
 
     if (normalizedStick < 0) {
@@ -81,15 +87,11 @@ class _ControlScreenState extends State<ControlScreen> {
     RawDatagramSocket? socket;
     try {
       socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      String data = "S:${servoAngle.toStringAsFixed(1)},T:${throttlePWM.toStringAsFixed(0)}";
+      String data =
+          "S:${servoAngle.toStringAsFixed(1)},T:${throttlePWM.toStringAsFixed(0)},L:$_headlightStage,P:${_parkingLightsOn ? 1 : 0}";
       final messageBytes = Uint8List.fromList(data.codeUnits);
-      int bytesSent = socket.send(messageBytes, InternetAddress(_espIP), _udpPort);
-      
-      if (bytesSent > 0) {
-        if (!_isConnected) {
-          setState(() => _isConnected = true);
-        }
-      }
+      socket.send(messageBytes, InternetAddress(_espIP), _udpPort);
+      setState(() => _isConnected = true);
     } catch (e) {
       debugPrint('UDP Error: $e');
       setState(() => _isConnected = false);
@@ -98,13 +100,29 @@ class _ControlScreenState extends State<ControlScreen> {
     }
   }
 
+  // --- UI Components ---
+  Widget _buildTrimStepButton({required IconData icon, required VoidCallback onPressed}) {
+    return GestureDetector(
+      onTap: onPressed,
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.white24),
+        ),
+        child: Icon(icon, color: Colors.greenAccent, size: 20),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xff1d271d), 
+      backgroundColor: const Color(0xff1d271d),
       body: Stack(
         children: [
-          // 1. TOP INFO BAR
+          // 1. TOP STATUS BAR
           Positioned(
             top: 20,
             left: 0,
@@ -117,63 +135,104 @@ class _ControlScreenState extends State<ControlScreen> {
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(_isConnected ? Icons.wifi : Icons.wifi_off, size: 14, color: Colors.white),
-                  const SizedBox(width: 8), // Slightly more breathing room
-                  Text(
-                    "STEER: ${servoAngle.toStringAsFixed(1)}° | THROTTLE: ${throttlePWM.toStringAsFixed(0)}",
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 11),
-                  ),
-                ],
-              ),
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(_isConnected ? Icons.wifi : Icons.wifi_off, size: 14, color: Colors.white),
+                    const SizedBox(width: 8),
+                    Text(
+                      "STEER: ${servoAngle.toStringAsFixed(1)}° | THROTTLE: ${throttlePWM.toStringAsFixed(0)}",
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
 
-          // TRIM BUTTON
+          // 2. TOP RIGHT CONTROLS
           Positioned(
             top: 40,
             right: 30,
-            child: GestureDetector(
-              onTap: () {
-                setState(() {
-                  _showTrimSlider = !_showTrimSlider;
-                });
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                decoration: BoxDecoration(
-                  color: _showTrimSlider ? Colors.greenAccent.withOpacity(0.2) : Colors.white.withOpacity(0.05),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: _showTrimSlider ? Colors.greenAccent : Colors.white24, 
-                    width: 1.5
+            child: Row(
+              children: [
+                // Parking Light Button
+                GestureDetector(
+                  onTap: () {
+                    setState(() => _parkingLightsOn = !_parkingLightsOn);
+                    _sendUDP();
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: _parkingLightsOn ? Colors.orangeAccent.withOpacity(0.2) : Colors.white.withOpacity(0.05),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: _parkingLightsOn ? Colors.orangeAccent : Colors.white24, width: 1.5),
+                      boxShadow: _parkingLightsOn ? [BoxShadow(color: Colors.orangeAccent.withOpacity(0.3), blurRadius: 8)] : [],
+                    ),
+                    child: Icon(Icons.warning_amber_rounded, color: _parkingLightsOn ? Colors.orangeAccent : Colors.white, size: 20),
                   ),
                 ),
-                child: Text(
-                  "TRIM",
-                  style: TextStyle(
-                    color: _showTrimSlider ? Colors.greenAccent : Colors.white,
-                    fontWeight: FontWeight.w900,
-                    fontSize: 14,
-                    letterSpacing: 1.2,
+                const SizedBox(width: 12),
+                // Headlight Button
+                GestureDetector(
+                  onTap: () {
+                    setState(() => _headlightStage = (_headlightStage + 1) % 3);
+                    _sendUDP();
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: _headlightStage == 0
+                          ? Colors.white.withOpacity(0.05)
+                          : _headlightStage == 1
+                              ? Colors.blueAccent.withOpacity(0.2)
+                              : Colors.yellowAccent.withOpacity(0.2),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: _headlightStage == 0
+                            ? Colors.white24
+                            : _headlightStage == 1
+                                ? Colors.blueAccent
+                                : Colors.yellowAccent,
+                        width: 1.5,
+                      ),
+                      boxShadow: _headlightStage > 0
+                          ? [BoxShadow(color: _headlightStage == 1 ? Colors.blueAccent.withOpacity(0.3) : Colors.yellowAccent.withOpacity(0.3), blurRadius: 8)]
+                          : [],
+                    ),
+                    child: Icon(Icons.highlight,
+                        color: _headlightStage == 0 ? Colors.white : _headlightStage == 1 ? Colors.blueAccent : Colors.yellowAccent, size: 20),
                   ),
                 ),
-              ),
+                const SizedBox(width: 15),
+                // Trim Menu Toggle
+                GestureDetector(
+                  onTap: () => setState(() => _showTrimSlider = !_showTrimSlider),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _showTrimSlider ? Colors.greenAccent.withOpacity(0.2) : Colors.white.withOpacity(0.05),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: _showTrimSlider ? Colors.greenAccent : Colors.white24, width: 1.5),
+                    ),
+                    child: Text(
+                      "TRIM",
+                      style: TextStyle(color: _showTrimSlider ? Colors.greenAccent : Colors.white, fontWeight: FontWeight.w900, fontSize: 14, letterSpacing: 1.2),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
 
+          // 3. STEERING TRIM OVERLAY
           if (_showTrimSlider)
             Center(
               child: Container(
                 width: 320,
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.8),
+                  color: Colors.black.withOpacity(0.9),
                   borderRadius: BorderRadius.circular(15),
                   border: Border.all(color: Colors.white10),
                 ),
@@ -184,13 +243,13 @@ class _ControlScreenState extends State<ControlScreen> {
                     const SizedBox(height: 10),
                     Row(
                       children: [
-                        const Text("-15", style: TextStyle(fontSize: 10)),
+                        const Text("-15", style: TextStyle(fontSize: 10, color: Colors.white38)),
                         Expanded(
                           child: Slider(
                             value: _trimValue,
                             min: -15,
                             max: 15,
-                            divisions: 300, // ✅ Changed from 60 to 300 for 0.1 degree steps
+                            divisions: 300,
                             activeColor: Colors.greenAccent,
                             label: _trimValue.toStringAsFixed(1),
                             onChanged: (val) {
@@ -200,62 +259,86 @@ class _ControlScreenState extends State<ControlScreen> {
                             },
                           ),
                         ),
-                        const Text("+15", style: TextStyle(fontSize: 10)),
+                        const Text("+15", style: TextStyle(fontSize: 10, color: Colors.white38)),
                       ],
                     ),
                     Text(
                       "Current Offset: ${_trimValue > 0 ? '+' : ''}${_trimValue.toStringAsFixed(1)}°",
-                      style: const TextStyle(color: Colors.greenAccent, fontSize: 12),
+                      style: const TextStyle(color: Colors.greenAccent, fontSize: 12, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 20),
+                    // Precision Control Row
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _buildTrimStepButton(
+                          icon: Icons.remove,
+                          onPressed: () {
+                            setState(() => _trimValue = (_trimValue - 0.1).clamp(-15.0, 15.0));
+                            _saveTrimValue(_trimValue);
+                            _sendUDP();
+                          },
+                        ),
+                        TextButton(
+                          style: TextButton.styleFrom(
+                            backgroundColor: Colors.white10,
+                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                          onPressed: () {
+                            setState(() => _trimValue = 0.0);
+                            _saveTrimValue(0.0);
+                            _sendUDP();
+                          },
+                          child: const Text("RESET", style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                        ),
+                        _buildTrimStepButton(
+                          icon: Icons.add,
+                          onPressed: () {
+                            setState(() => _trimValue = (_trimValue + 0.1).clamp(-15.0, 15.0));
+                            _saveTrimValue(_trimValue);
+                            _sendUDP();
+                          },
+                        ),
+                      ],
                     ),
                   ],
                 ),
               ),
             ),
 
-          // 2. CENTERED SPEEDOMETER
+          // 4. SPEEDOMETER
           Positioned(
             bottom: 20,
             left: 0,
             right: 0,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Stack(
-                  alignment: Alignment.bottomCenter,
-                  children: [
-                    CustomPaint(
-                      size: const Size(160, 80),
-                      painter: SpeedometerPainter(displaySpeed),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 5),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            displaySpeed.toStringAsFixed(0),
-                            style: TextStyle(
-                                fontSize: 34,
-                                fontWeight: FontWeight.w900,
-                                color: displaySpeed > 90 ? Colors.redAccent : Colors.white),
-                          ),
-                          Text(
-                            "M/H",
-                            style: TextStyle(
-                                color: displaySpeed > 90 ? Colors.redAccent : Colors.white54,
-                                fontSize: 10,
-                                fontWeight: FontWeight.bold),
-                          ),
-                        ],
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Stack(
+                    alignment: Alignment.bottomCenter,
+                    children: [
+                      CustomPaint(size: const Size(160, 80), painter: SpeedometerPainter(displaySpeed)),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 5),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(displaySpeed.toStringAsFixed(0),
+                                style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: displaySpeed > 90 ? Colors.redAccent : Colors.white)),
+                            const Text("M/H", style: TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
 
-          // 3. STEERING WHEEL
+          // 5. STEERING WHEEL
           Positioned(
             bottom: 30,
             left: 70,
@@ -264,16 +347,16 @@ class _ControlScreenState extends State<ControlScreen> {
                 const Text("STEERING", style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 10),
                 GestureDetector(
-                  onPanUpdate: (details) async {
+                  onPanUpdate: (details) {
                     setState(() {
                       _steeringAngle += details.delta.dx / 60;
                       _steeringAngle = _steeringAngle.clamp(-2.0, 2.0);
                     });
-                    await _sendUDP();
+                    _sendUDP();
                   },
-                  onPanEnd: (_) async {
+                  onPanEnd: (_) {
                     setState(() => _steeringAngle = 0.0);
-                    await _sendUDP();
+                    _sendUDP();
                   },
                   child: Transform.rotate(
                     angle: _steeringAngle,
@@ -288,16 +371,15 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // 4. THROTTLE CONTROL
+          // 6. THROTTLE BAR
           Positioned(
             bottom: 30,
             right: 80,
             child: Column(
               children: [
-                const Text(" THROTTLE", style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold)),
+                const Text("THROTTLE", style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 10),
                 Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     const Column(
                       children: [
@@ -308,16 +390,16 @@ class _ControlScreenState extends State<ControlScreen> {
                     ),
                     const SizedBox(width: 15),
                     GestureDetector(
-                      onVerticalDragUpdate: (details) async {
+                      onVerticalDragUpdate: (details) {
                         setState(() {
                           _throttleRaw -= details.delta.dy / 100;
                           _throttleRaw = _throttleRaw.clamp(-1.0, 1.0);
                         });
-                        await _sendUDP();
+                        _sendUDP();
                       },
-                      onVerticalDragEnd: (_) async {
+                      onVerticalDragEnd: (_) {
                         setState(() => _throttleRaw = 0.0);
-                        await _sendUDP();
+                        _sendUDP();
                       },
                       child: Container(
                         height: 205,
@@ -335,9 +417,7 @@ class _ControlScreenState extends State<ControlScreen> {
                               child: Container(
                                 width: 50,
                                 height: (_throttleRaw.abs() * 100),
-                                color: _throttleRaw >= 0 
-                                    ? Colors.greenAccent.withOpacity(0.3) 
-                                    : Colors.redAccent.withOpacity(0.3),
+                                color: _throttleRaw >= 0 ? Colors.greenAccent.withOpacity(0.3) : Colors.redAccent.withOpacity(0.3),
                               ),
                             ),
                             Container(height: 1, width: 50, color: Colors.white24),
@@ -371,30 +451,25 @@ class _ControlScreenState extends State<ControlScreen> {
 class SpeedometerPainter extends CustomPainter {
   final double speed;
   SpeedometerPainter(this.speed);
-
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height);
     final radius = size.width * 0.5;
     final rect = Rect.fromCircle(center: center, radius: radius);
-
     final trackPaint = Paint()
       ..color = Colors.white.withOpacity(0.1)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 10
       ..strokeCap = StrokeCap.round;
-    canvas.drawArc(rect, 3.14, 3.14, false, trackPaint); 
-
+    canvas.drawArc(rect, 3.14, 3.14, false, trackPaint);
     final progressPaint = Paint()
       ..color = speed > 90 ? Colors.redAccent : Colors.greenAccent
       ..style = PaintingStyle.stroke
       ..strokeWidth = 10
       ..strokeCap = StrokeCap.round;
-    
-    double sweepAngle = (speed / 120) * 3.14;  
+    double sweepAngle = (speed / 120) * 3.14;
     canvas.drawArc(rect, 3.14, sweepAngle, false, progressPaint);
   }
-
   @override
   bool shouldRepaint(SpeedometerPainter oldDelegate) => oldDelegate.speed != speed;
 }
