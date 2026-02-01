@@ -31,7 +31,7 @@ class ControlScreen extends StatefulWidget {
 }
 
 class _ControlScreenState extends State<ControlScreen> {
-  // --- Existing Variables ---
+  // --- Control Variables ---
   double _steeringAngle = 0.0;
   double _throttleRaw = 0.0;
   double _trimValue = 0.0;
@@ -40,11 +40,15 @@ class _ControlScreenState extends State<ControlScreen> {
   int _headlightStage = 0; 
   bool _parkingLightsOn = false;
   bool _spoilerUp = false;
-
-  // --- New Brake Variable ---
   bool _isBraking = false;
 
-  // --- Auto-Discovery Variables ---
+  // --- S1, S2, S3 & Auto Variables ---
+  bool _s1Active = false;
+  bool _s2Active = false;
+  bool _s3Active = false;
+  bool _autoActive = false; // Local state only
+
+  // --- Networking Variables ---
   String _espIP = '0.0.0.0'; 
   final int _udpPort = 8888;
   final int _discoveryPort = 8889;
@@ -65,12 +69,10 @@ class _ControlScreenState extends State<ControlScreen> {
     _startDiscovery();
     _setupControlSocket(); 
     
-    // Send data every 150ms
     _heartbeatTimer = Timer.periodic(const Duration(milliseconds: 150), (timer) {
       if (_espIP != '0.0.0.0') _sendUDP();
     });
 
-    // Indicator blinker
     _blinkTimer = Timer.periodic(const Duration(milliseconds: 400), (timer) {
       setState(() { _blinkState = !_blinkState; });
     });
@@ -86,7 +88,6 @@ class _ControlScreenState extends State<ControlScreen> {
     super.dispose();
   }
 
-  // --- Existing Logic (Unchanged) ---
   void _startDiscovery() async {
     _discoverySocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, _discoveryPort);
     _discoverySocket?.listen((RawSocketEvent event) {
@@ -135,7 +136,7 @@ class _ControlScreenState extends State<ControlScreen> {
   }
 
   double get throttlePWM {
-    if (_isBraking) return 1500.0; // Force neutral on brake
+    if (_isBraking) return 1500.0;
     return (_throttleRaw + 1.0) * 500 + 1000;
   }
 
@@ -149,12 +150,19 @@ class _ControlScreenState extends State<ControlScreen> {
         : center + (normalizedStick * (112.0 - center));
   }
 
-  // --- Updated Send Data with Brake State ---
+  // --- UDP SEND LOGIC (Auto state removed) ---
   Future<void> _sendUDP() async {
     if (_controlSocket == null || _espIP == '0.0.0.0') return;
     try {
-      // Logic: S=Steer, T=Throttle, L=Headlights, P=Parking, W=Wing/Spoiler, B=Brake
-      String data = "S:${servoAngle.toStringAsFixed(1)},T:${throttlePWM.toStringAsFixed(0)},L:$_headlightStage,P:${_parkingLightsOn ? 1 : 0},W:${_spoilerUp ? 1 : 0},B:${_isBraking ? 1 : 0}";
+      String data = "S:${servoAngle.toStringAsFixed(1)},"
+                    "T:${throttlePWM.toStringAsFixed(0)},"
+                    "L:$_headlightStage,"
+                    "P:${_parkingLightsOn ? 1 : 0},"
+                    "W:${_spoilerUp ? 1 : 0},"
+                    "B:${_isBraking ? 1 : 0},"
+                    "S1:${_s1Active ? 1 : 0},"
+                    "S2:${_s2Active ? 1 : 0},"
+                    "S3:${_s3Active ? 1 : 0}";
       _controlSocket?.send(Uint8List.fromList(data.codeUnits), InternetAddress(_espIP), _udpPort);
     } catch (e) { debugPrint('UDP Error: $e'); }
   }
@@ -168,31 +176,68 @@ class _ControlScreenState extends State<ControlScreen> {
       backgroundColor: const Color(0xff1d271d),
       body: Stack(
         children: [
-          // IP Display
           Positioned(top: 10, left: 10, child: Text("IP: $_espIP", style: const TextStyle(fontSize: 9, color: Colors.white24))),
           
           Positioned(top: 20, left: 0, right: 0, child: Center(child: Container(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 6), decoration: BoxDecoration(color: _isConnected ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2), borderRadius: BorderRadius.circular(20)), child: Text("STEER: ${servoAngle.toStringAsFixed(1)}° | THROTTLE: ${throttlePWM.toStringAsFixed(0)}", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))))),
           Positioned(top: 30, left: 60, child: _buildSignalBattery()),
 
-          // Existing Buttons
+          // ACTION BUTTONS GROUP
           Positioned(
             top: 40, right: 30,
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildCircularButton(icon: Icons.flight_takeoff, active: _spoilerUp, color: Colors.cyanAccent, onTap: () => setState(() => _spoilerUp = !_spoilerUp)),
-                const SizedBox(width: 12),
-                _buildCircularButton(icon: Icons.warning_amber_rounded, active: _parkingLightsOn, color: Colors.orangeAccent, onTap: () => setState(() => _parkingLightsOn = !_parkingLightsOn)),
-                const SizedBox(width: 12),
-                _buildCircularButton(icon: Icons.highlight, active: _headlightStage > 0, color: _headlightStage == 1 ? Colors.blueAccent : Colors.yellowAccent, onTap: () => setState(() => _headlightStage = (_headlightStage + 1) % 3)),
+                // CIRCULAR BUTTONS COLUMN
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start, 
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildCircularButton(icon: Icons.flight_takeoff, active: _spoilerUp, color: Colors.cyanAccent, onTap: () => setState(() => _spoilerUp = !_spoilerUp)),
+                        const SizedBox(width: 12),
+                        _buildCircularButton(icon: Icons.warning_amber_rounded, active: _parkingLightsOn, color: Colors.orangeAccent, onTap: () => setState(() => _parkingLightsOn = !_parkingLightsOn)),
+                        const SizedBox(width: 12),
+                        _buildCircularButton(icon: Icons.highlight, active: _headlightStage > 0, color: _headlightStage == 1 ? Colors.blueAccent : Colors.yellowAccent, onTap: () => setState(() => _headlightStage = (_headlightStage + 1) % 3)),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildCircularButton(label: "S1", active: _s1Active, color: Colors.purpleAccent, onTap: () => setState(() => _s1Active = !_s1Active)),
+                        const SizedBox(width: 12),
+                        _buildCircularButton(label: "S2", active: _s2Active, color: Colors.purpleAccent, onTap: () => setState(() => _s2Active = !_s2Active)),
+                        const SizedBox(width: 12),
+                        _buildCircularButton(label: "S3", active: _s3Active, color: Colors.purpleAccent, onTap: () => setState(() => _s3Active = !_s3Active)),
+                      ],
+                    ),
+                  ],
+                ),
                 const SizedBox(width: 15),
-                GestureDetector(onTap: () => setState(() => _showTrimSlider = !_showTrimSlider), child: Container(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8), decoration: BoxDecoration(color: _showTrimSlider ? Colors.greenAccent.withOpacity(0.2) : Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(8), border: Border.all(color: _showTrimSlider ? Colors.greenAccent : Colors.white24, width: 1.5)), child: const Text("TRIM", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14)))),
+                // RECTANGULAR BUTTONS COLUMN (TRIM & AUTO)
+                Column(
+                  children: [
+                    _buildRectButton(
+                      label: "TRIM", 
+                      active: _showTrimSlider, 
+                      onTap: () => setState(() => _showTrimSlider = !_showTrimSlider)
+                    ),
+                    const SizedBox(height: 12),
+                    _buildRectButton(
+                      label: "AUTO", 
+                      active: _autoActive, 
+                      activeColor: Colors.blueAccent,
+                      onTap: () => setState(() => _autoActive = !_autoActive)
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
 
           if (_showTrimSlider) Center(child: _buildTrimPanel()),
 
-          // Speedometer
           Positioned(
             bottom: 20, left: 0, right: 0, 
             child: Center(
@@ -208,17 +253,14 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // Steering Wheel
           Positioned(bottom: 30, left: 70, child: GestureDetector(onPanUpdate: (details) { setState(() { _steeringAngle += details.delta.dx / 60; _steeringAngle = _steeringAngle.clamp(-2.0, 2.0); }); }, onPanEnd: (_) { setState(() => _steeringAngle = 0.0); }, child: Transform.rotate(angle: _steeringAngle, child: SizedBox(width: 180, height: 180, child: Image.asset('images/steering_wheel.png', fit: BoxFit.contain))))),
 
-          // Throttle + Brake Section
           Positioned(
             bottom: 30, 
             right: 80, 
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                // NEW BRAKE BUTTON
                 GestureDetector(
                   onTapDown: (_) => setState(() => _isBraking = true),
                   onTapUp: (_) => setState(() => _isBraking = false),
@@ -243,14 +285,39 @@ class _ControlScreenState extends State<ControlScreen> {
     );
   }
 
-  // --- Helper Widgets (Identical to your current version) ---
-  Widget _buildCircularButton({required IconData icon, required bool active, required Color color, required VoidCallback onTap}) {
+  Widget _buildRectButton({required String label, required bool active, required VoidCallback onTap, Color activeColor = Colors.greenAccent}) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(color: active ? color.withOpacity(0.2) : Colors.white.withOpacity(0.05), shape: BoxShape.circle, border: Border.all(color: active ? color : Colors.white24, width: 1.5)),
-        child: Icon(icon, color: active ? color : Colors.white, size: 20),
+        width: 80, 
+        padding: const EdgeInsets.symmetric(vertical: 8), 
+        decoration: BoxDecoration(
+          color: active ? activeColor.withOpacity(0.2) : Colors.white.withOpacity(0.05), 
+          borderRadius: BorderRadius.circular(8), 
+          border: Border.all(color: active ? activeColor : Colors.white24, width: 1.5)
+        ), 
+        child: Center(
+          child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14))
+        )
+      )
+    );
+  }
+
+  Widget _buildCircularButton({IconData? icon, String? label, required bool active, required Color color, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 40, height: 40,
+        decoration: BoxDecoration(
+          color: active ? color.withOpacity(0.2) : Colors.white.withOpacity(0.05),
+          shape: BoxShape.circle,
+          border: Border.all(color: active ? color : Colors.white24, width: 1.5)
+        ),
+        child: Center(
+          child: icon != null 
+            ? Icon(icon, color: active ? color : Colors.white, size: 20)
+            : Text(label ?? "", style: TextStyle(color: active ? color : Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+        ),
       ),
     );
   }
