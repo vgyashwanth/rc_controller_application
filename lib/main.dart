@@ -31,6 +31,7 @@ class ControlScreen extends StatefulWidget {
 }
 
 class _ControlScreenState extends State<ControlScreen> {
+  // --- Existing Variables ---
   double _steeringAngle = 0.0;
   double _throttleRaw = 0.0;
   double _trimValue = 0.0;
@@ -40,7 +41,10 @@ class _ControlScreenState extends State<ControlScreen> {
   bool _parkingLightsOn = false;
   bool _spoilerUp = false;
 
-  // AUTO-DISCOVERY VARIABLES
+  // --- New Brake Variable ---
+  bool _isBraking = false;
+
+  // --- Auto-Discovery Variables ---
   String _espIP = '0.0.0.0'; 
   final int _udpPort = 8888;
   final int _discoveryPort = 8889;
@@ -61,16 +65,28 @@ class _ControlScreenState extends State<ControlScreen> {
     _startDiscovery();
     _setupControlSocket(); 
     
+    // Send data every 150ms
     _heartbeatTimer = Timer.periodic(const Duration(milliseconds: 150), (timer) {
       if (_espIP != '0.0.0.0') _sendUDP();
     });
 
+    // Indicator blinker
     _blinkTimer = Timer.periodic(const Duration(milliseconds: 400), (timer) {
       setState(() { _blinkState = !_blinkState; });
     });
   }
 
-  // LISTENS FOR ESP BROADCAST
+  @override
+  void dispose() {
+    _heartbeatTimer?.cancel();
+    _blinkTimer?.cancel();
+    _connTimeout?.cancel();
+    _controlSocket?.close();
+    _discoverySocket?.close();
+    super.dispose();
+  }
+
+  // --- Existing Logic (Unchanged) ---
   void _startDiscovery() async {
     _discoverySocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, _discoveryPort);
     _discoverySocket?.listen((RawSocketEvent event) {
@@ -79,9 +95,7 @@ class _ControlScreenState extends State<ControlScreen> {
         if (dg != null) {
           String msg = String.fromCharCodes(dg.data);
           if (msg == "ESP_DISCOVERY") {
-            setState(() {
-              _espIP = dg.address.address; // AUTOMATICALLY ASSIGN IP
-            });
+            setState(() { _espIP = dg.address.address; });
           }
         }
       }
@@ -120,7 +134,11 @@ class _ControlScreenState extends State<ControlScreen> {
     await prefs.setDouble('steering_trim', value);
   }
 
-  double get throttlePWM => (_throttleRaw + 1.0) * 500 + 1000;
+  double get throttlePWM {
+    if (_isBraking) return 1500.0; // Force neutral on brake
+    return (_throttleRaw + 1.0) * 500 + 1000;
+  }
+
   double get displaySpeed => ((throttlePWM - 1500).abs() / 500) * 120;
 
   double get servoAngle {
@@ -131,15 +149,16 @@ class _ControlScreenState extends State<ControlScreen> {
         : center + (normalizedStick * (112.0 - center));
   }
 
+  // --- Updated Send Data with Brake State ---
   Future<void> _sendUDP() async {
     if (_controlSocket == null || _espIP == '0.0.0.0') return;
     try {
-      String data = "S:${servoAngle.toStringAsFixed(1)},T:${throttlePWM.toStringAsFixed(0)},L:$_headlightStage,P:${_parkingLightsOn ? 1 : 0},W:${_spoilerUp ? 1 : 0}";
+      // Logic: S=Steer, T=Throttle, L=Headlights, P=Parking, W=Wing/Spoiler, B=Brake
+      String data = "S:${servoAngle.toStringAsFixed(1)},T:${throttlePWM.toStringAsFixed(0)},L:$_headlightStage,P:${_parkingLightsOn ? 1 : 0},W:${_spoilerUp ? 1 : 0},B:${_isBraking ? 1 : 0}";
       _controlSocket?.send(Uint8List.fromList(data.codeUnits), InternetAddress(_espIP), _udpPort);
     } catch (e) { debugPrint('UDP Error: $e'); }
   }
 
-  // UI remains the same as your working version
   @override
   Widget build(BuildContext context) {
     bool leftActive = servoAngle <= 76.0;
@@ -149,13 +168,13 @@ class _ControlScreenState extends State<ControlScreen> {
       backgroundColor: const Color(0xff1d271d),
       body: Stack(
         children: [
-          // IP DISPLAY (So you can see it working)
+          // IP Display
           Positioned(top: 10, left: 10, child: Text("IP: $_espIP", style: const TextStyle(fontSize: 9, color: Colors.white24))),
           
           Positioned(top: 20, left: 0, right: 0, child: Center(child: Container(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 6), decoration: BoxDecoration(color: _isConnected ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2), borderRadius: BorderRadius.circular(20)), child: Text("STEER: ${servoAngle.toStringAsFixed(1)}° | THROTTLE: ${throttlePWM.toStringAsFixed(0)}", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))))),
           Positioned(top: 30, left: 60, child: _buildSignalBattery()),
 
-          // BUTTONS
+          // Existing Buttons
           Positioned(
             top: 40, right: 30,
             child: Row(
@@ -171,10 +190,9 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // TRIM OVERLAY
           if (_showTrimSlider) Center(child: _buildTrimPanel()),
 
-          // SPEEDOMETER
+          // Speedometer
           Positioned(
             bottom: 20, left: 0, right: 0, 
             child: Center(
@@ -190,16 +208,42 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
 
-          // STEERING
+          // Steering Wheel
           Positioned(bottom: 30, left: 70, child: GestureDetector(onPanUpdate: (details) { setState(() { _steeringAngle += details.delta.dx / 60; _steeringAngle = _steeringAngle.clamp(-2.0, 2.0); }); }, onPanEnd: (_) { setState(() => _steeringAngle = 0.0); }, child: Transform.rotate(angle: _steeringAngle, child: SizedBox(width: 180, height: 180, child: Image.asset('images/steering_wheel.png', fit: BoxFit.contain))))),
 
-          // THROTTLE
-          Positioned(bottom: 30, right: 80, child: _buildThrottleControl()),
+          // Throttle + Brake Section
+          Positioned(
+            bottom: 30, 
+            right: 80, 
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                // NEW BRAKE BUTTON
+                GestureDetector(
+                  onTapDown: (_) => setState(() => _isBraking = true),
+                  onTapUp: (_) => setState(() => _isBraking = false),
+                  onTapCancel: () => setState(() => _isBraking = false),
+                  child: Container(
+                    height: 100, width: 60,
+                    decoration: BoxDecoration(
+                      color: _isBraking ? Colors.red : Colors.red.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.red, width: 2),
+                    ),
+                    child: const Center(child: Text("BRAKE", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white))),
+                  ),
+                ),
+                const SizedBox(width: 20),
+                _buildThrottleControl(),
+              ],
+            ),
+          ),
         ],
       ),
     );
   }
 
+  // --- Helper Widgets (Identical to your current version) ---
   Widget _buildCircularButton({required IconData icon, required bool active, required Color color, required VoidCallback onTap}) {
     return GestureDetector(
       onTap: onTap,
