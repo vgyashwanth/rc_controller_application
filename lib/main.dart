@@ -30,31 +30,36 @@ class ControlScreen extends StatefulWidget {
   State<ControlScreen> createState() => _ControlScreenState();
 }
 
-class _ControlScreenState extends State<ControlScreen> {
-  // --- Control Variables ---
+class _ControlScreenState extends State<ControlScreen> with SingleTickerProviderStateMixin {
+  // --- Control & UI Variables ---
   double _steeringAngle = 0.0;
-  double _throttleRaw = 0.0;
+  double _throttleRaw = 0.0; 
   double _trimValue = 0.0;
-
   bool _showTrimSlider = false;
   int _headlightStage = 0; 
   bool _parkingLightsOn = false;
   bool _spoilerUp = false;
   bool _isBraking = false;
-
-  // --- S1, S2, S3 & Auto Variables ---
+  bool _isReversing = false; 
   bool _s1Active = false;
   bool _s2Active = false;
   bool _s3Active = false;
-  bool _autoActive = false; // Local state only
+  bool _autoActive = false; 
 
-  // --- Networking Variables ---
+  // --- Nitro Logic ---
+  int _nitroStage = 0; 
+  double _animatedNitroPWM = 1500.0;
+  Timer? _initialDelayTimer; 
+  Timer? _continuousDropTimer; 
+  late AnimationController _nitroController;
+  late Animation<double> _nitroAnimation;
+
+  // --- Networking & Signal Indicator ---
   String _espIP = '0.0.0.0'; 
   final int _udpPort = 8888;
   final int _discoveryPort = 8889;
   bool _isConnected = false;
   int _rssi = 0; 
-  
   RawDatagramSocket? _controlSocket;
   RawDatagramSocket? _discoverySocket;
   Timer? _connTimeout;
@@ -68,6 +73,10 @@ class _ControlScreenState extends State<ControlScreen> {
     _loadTrimValue();
     _startDiscovery();
     _setupControlSocket(); 
+
+    _nitroController = AnimationController(vsync: this, duration: const Duration(milliseconds: 500));
+    _nitroAnimation = Tween<double>(begin: 1500.0, end: 1500.0).animate(_nitroController)
+      ..addListener(() { setState(() { _animatedNitroPWM = _nitroAnimation.value; }); });
     
     _heartbeatTimer = Timer.periodic(const Duration(milliseconds: 150), (timer) {
       if (_espIP != '0.0.0.0') _sendUDP();
@@ -80,14 +89,81 @@ class _ControlScreenState extends State<ControlScreen> {
 
   @override
   void dispose() {
+    _nitroController.dispose();
     _heartbeatTimer?.cancel();
     _blinkTimer?.cancel();
     _connTimeout?.cancel();
+    _initialDelayTimer?.cancel();
+    _continuousDropTimer?.cancel();
     _controlSocket?.close();
     _discoverySocket?.close();
     super.dispose();
   }
 
+  // --- PERSISTENCE ---
+  Future<void> _loadTrimValue() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() => _trimValue = prefs.getDouble('steering_trim') ?? 0.0);
+  }
+
+  Future<void> _saveTrimValue(double value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('steering_trim', value);
+  }
+
+  // --- NITRO LOGIC ---
+  void _increaseNitro() {
+    int cap = _isReversing ? 2 : 5;
+    if (_nitroStage < cap) {
+      _nitroStage++;
+      double targetPWM = _isReversing 
+          ? 1500.0 - (_nitroStage * 100) 
+          : 1500.0 + (_nitroStage * 100);
+      _animateToPWM(targetPWM);
+      setState(() {}); 
+    }
+  }
+
+  void _decreaseNitro() {
+    if (_nitroStage > 0) {
+      _nitroStage--;
+      double targetPWM = _isReversing 
+          ? 1500.0 - (_nitroStage * 100)
+          : 1500.0 + (_nitroStage * 100);
+      _animateToPWM(targetPWM);
+      setState(() {});
+    }
+  }
+
+  void _animateToPWM(double target) {
+    _nitroAnimation = Tween<double>(begin: _animatedNitroPWM, end: target).animate(
+      CurvedAnimation(parent: _nitroController, curve: Curves.linear)
+    );
+    _nitroController.forward(from: 0);
+  }
+
+  void _startCooldownLogic() {
+    _stopCooldownLogic();
+    _initialDelayTimer = Timer(const Duration(seconds: 3), () {
+      _continuousDropTimer = Timer.periodic(const Duration(milliseconds: 550), (timer) {
+        if (_nitroStage > 0) { _decreaseNitro(); } else { timer.cancel(); }
+      });
+    });
+  }
+
+  void _stopCooldownLogic() {
+    _initialDelayTimer?.cancel();
+    _continuousDropTimer?.cancel();
+  }
+
+  void _emergencyStopNitro() {
+    _nitroStage = 0;
+    _animateToPWM(1500.0);
+    _stopCooldownLogic();
+    setState(() {});
+  }
+
+  // --- NETWORKING ---
   void _startDiscovery() async {
     _discoverySocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, _discoveryPort);
     _discoverySocket?.listen((RawSocketEvent event) {
@@ -95,9 +171,7 @@ class _ControlScreenState extends State<ControlScreen> {
         Datagram? dg = _discoverySocket?.receive();
         if (dg != null) {
           String msg = String.fromCharCodes(dg.data);
-          if (msg == "ESP_DISCOVERY") {
-            setState(() { _espIP = dg.address.address; });
-          }
+          if (msg == "ESP_DISCOVERY") setState(() => _espIP = dg.address.address);
         }
       }
     });
@@ -111,13 +185,13 @@ class _ControlScreenState extends State<ControlScreen> {
         if (dg != null) {
           String response = String.fromCharCodes(dg.data);
           if (response.startsWith("RSSI:")) {
-            setState(() {
-              _rssi = int.tryParse(response.split(":")[1]) ?? 0;
-              _isConnected = true;
+            setState(() { 
+              _rssi = int.tryParse(response.split(":")[1]) ?? 0; 
+              _isConnected = true; 
             });
             _connTimeout?.cancel();
-            _connTimeout = Timer(const Duration(seconds: 3), () {
-              setState(() { _isConnected = false; _rssi = 0; });
+            _connTimeout = Timer(const Duration(seconds: 3), () { 
+              setState(() { _isConnected = false; _rssi = 0; }); 
             });
           }
         }
@@ -125,18 +199,9 @@ class _ControlScreenState extends State<ControlScreen> {
     });
   }
 
-  Future<void> _loadTrimValue() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() => _trimValue = prefs.getDouble('steering_trim') ?? 0.0);
-  }
-
-  Future<void> _saveTrimValue(double value) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('steering_trim', value);
-  }
-
   double get throttlePWM {
     if (_isBraking) return 1500.0;
+    if (_autoActive) return _animatedNitroPWM;
     return (_throttleRaw + 1.0) * 500 + 1000;
   }
 
@@ -150,19 +215,10 @@ class _ControlScreenState extends State<ControlScreen> {
         : center + (normalizedStick * (112.0 - center));
   }
 
-  // --- UDP SEND LOGIC (Auto state removed) ---
   Future<void> _sendUDP() async {
     if (_controlSocket == null || _espIP == '0.0.0.0') return;
     try {
-      String data = "S:${servoAngle.toStringAsFixed(1)},"
-                    "T:${throttlePWM.toStringAsFixed(0)},"
-                    "L:$_headlightStage,"
-                    "P:${_parkingLightsOn ? 1 : 0},"
-                    "W:${_spoilerUp ? 1 : 0},"
-                    "B:${_isBraking ? 1 : 0},"
-                    "S1:${_s1Active ? 1 : 0},"
-                    "S2:${_s2Active ? 1 : 0},"
-                    "S3:${_s3Active ? 1 : 0}";
+      String data = "S:${servoAngle.toStringAsFixed(1)},T:${throttlePWM.toStringAsFixed(0)},L:$_headlightStage,P:${_parkingLightsOn ? 1 : 0},W:${_spoilerUp ? 1 : 0},B:${_isBraking ? 1 : 0},H:${_s1Active ? 1 : 0},S2:${_s2Active ? 1 : 0},S3:${_s3Active ? 1 : 0}";
       _controlSocket?.send(Uint8List.fromList(data.codeUnits), InternetAddress(_espIP), _udpPort);
     } catch (e) { debugPrint('UDP Error: $e'); }
   }
@@ -176,18 +232,25 @@ class _ControlScreenState extends State<ControlScreen> {
       backgroundColor: const Color(0xff1d271d),
       body: Stack(
         children: [
-          Positioned(top: 10, left: 10, child: Text("IP: $_espIP", style: const TextStyle(fontSize: 9, color: Colors.white24))),
-          
-          Positioned(top: 20, left: 0, right: 0, child: Center(child: Container(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 6), decoration: BoxDecoration(color: _isConnected ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2), borderRadius: BorderRadius.circular(20)), child: Text("STEER: ${servoAngle.toStringAsFixed(1)}° | THROTTLE: ${throttlePWM.toStringAsFixed(0)}", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))))),
-          Positioned(top: 30, left: 60, child: _buildSignalBattery()),
+          Positioned(
+            top: 15, left: 15, 
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text("IP: $_espIP", style: const TextStyle(fontSize: 9, color: Colors.white24, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 5),
+                _buildSignalIndicator(),
+              ],
+            ),
+          ),
 
-          // ACTION BUTTONS GROUP
+          Positioned(top: 20, left: 0, right: 0, child: Center(child: Container(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 6), decoration: BoxDecoration(color: _isConnected ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2), borderRadius: BorderRadius.circular(20)), child: Text("PWM: ${throttlePWM.toStringAsFixed(0)} | STEER: ${servoAngle.toStringAsFixed(1)}°", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))))),
+          
           Positioned(
             top: 40, right: 30,
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // CIRCULAR BUTTONS COLUMN
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start, 
                   children: [
@@ -205,7 +268,13 @@ class _ControlScreenState extends State<ControlScreen> {
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _buildCircularButton(label: "S1", active: _s1Active, color: Colors.purpleAccent, onTap: () => setState(() => _s1Active = !_s1Active)),
+                        // HORN BUTTON - MOMENTARY BEHAVIOR
+                        GestureDetector(
+                          onTapDown: (_) => setState(() => _s1Active = true),
+                          onTapUp: (_) => setState(() => _s1Active = false),
+                          onTapCancel: () => setState(() => _s1Active = false),
+                          child: _buildCircularButton(icon: Icons.campaign, active: _s1Active, color: Colors.purpleAccent, onTap: () {}),
+                        ),
                         const SizedBox(width: 12),
                         _buildCircularButton(label: "S2", active: _s2Active, color: Colors.purpleAccent, onTap: () => setState(() => _s2Active = !_s2Active)),
                         const SizedBox(width: 12),
@@ -215,21 +284,17 @@ class _ControlScreenState extends State<ControlScreen> {
                   ],
                 ),
                 const SizedBox(width: 15),
-                // RECTANGULAR BUTTONS COLUMN (TRIM & AUTO)
                 Column(
                   children: [
-                    _buildRectButton(
-                      label: "TRIM", 
-                      active: _showTrimSlider, 
-                      onTap: () => setState(() => _showTrimSlider = !_showTrimSlider)
-                    ),
+                    _buildRectButton(label: "TRIM", active: _showTrimSlider, onTap: () => setState(() => _showTrimSlider = !_showTrimSlider)),
                     const SizedBox(height: 12),
-                    _buildRectButton(
-                      label: "AUTO", 
-                      active: _autoActive, 
-                      activeColor: Colors.blueAccent,
-                      onTap: () => setState(() => _autoActive = !_autoActive)
-                    ),
+                    _buildRectButton(label: "AUTO", active: _autoActive, activeColor: Colors.orangeAccent, onTap: () { 
+                      setState(() { 
+                        _autoActive = !_autoActive; 
+                        _isReversing = false; 
+                        _emergencyStopNitro(); 
+                      }); 
+                    }),
                   ],
                 ),
               ],
@@ -261,22 +326,61 @@ class _ControlScreenState extends State<ControlScreen> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                GestureDetector(
-                  onTapDown: (_) => setState(() => _isBraking = true),
-                  onTapUp: (_) => setState(() => _isBraking = false),
-                  onTapCancel: () => setState(() => _isBraking = false),
-                  child: Container(
-                    height: 100, width: 60,
-                    decoration: BoxDecoration(
-                      color: _isBraking ? Colors.red : Colors.red.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: Colors.red, width: 2),
+                Column(
+                  children: [
+                    if (_autoActive)
+                      GestureDetector(
+                        onTap: () { setState(() { _isReversing = !_isReversing; _emergencyStopNitro(); }); },
+                        child: Container(
+                          height: 60, width: 60, 
+                          decoration: BoxDecoration(color: _isReversing ? Colors.blue : Colors.blue.withOpacity(0.15), borderRadius: BorderRadius.circular(10), border: Border.all(color: _isReversing ? Colors.white : Colors.blue, width: 2)), 
+                          child: Center(child: Text("R", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: _isReversing ? Colors.white : Colors.blue))),
+                        ),
+                      ),
+                    if (_autoActive) const SizedBox(height: 10),
+                    GestureDetector(
+                      onTapDown: (_) { setState(() => _isBraking = true); _emergencyStopNitro(); },
+                      onTapUp: (_) => setState(() => _isBraking = false),
+                      onTapCancel: () => setState(() => _isBraking = false),
+                      child: Container(height: 100, width: 60, decoration: BoxDecoration(color: _isBraking ? Colors.red : Colors.red.withOpacity(0.2), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.red, width: 2)), child: const Center(child: Text("BRAKE", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white)))),
                     ),
-                    child: const Center(child: Text("BRAKE", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white))),
-                  ),
+                  ],
                 ),
                 const SizedBox(width: 20),
-                _buildThrottleControl(),
+                _autoActive ? _buildNitroTapBar() : _buildThrottleControl(),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSignalIndicator() {
+    int percentage = ((_rssi + 100) * 2).clamp(0, 100);
+    Color color = percentage > 60 ? Colors.greenAccent : percentage > 30 ? Colors.orangeAccent : Colors.redAccent;
+    return Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.wifi, color: color, size: 16), const SizedBox(width: 5), Text(_isConnected ? "$percentage%" : "OFFLINE", style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.bold))]);
+  }
+
+  Widget _buildNitroTapBar() {
+    double fillPercent = ((_animatedNitroPWM - 1500).abs() / 500).clamp(0.0, 1.0);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onPanDown: (_) { _stopCooldownLogic(); _increaseNitro(); },
+      onPanEnd: (_) { _startCooldownLogic(); },
+      onPanCancel: () => _startCooldownLogic(),
+      child: Column(
+        children: [
+          Text("GEAR $_nitroStage", style: TextStyle(color: _isReversing ? Colors.blueAccent : Colors.orangeAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 5),
+          Container(
+            height: 205, width: 70,
+            decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(12), border: Border.all(color: (_isReversing ? Colors.blueAccent : Colors.orangeAccent).withOpacity(0.5), width: 2)),
+            child: Stack(
+              alignment: Alignment.bottomCenter,
+              children: [
+                Container(width: 70, height: 205 * fillPercent, decoration: BoxDecoration(gradient: LinearGradient(colors: _isReversing ? [Colors.blue, Colors.lightBlueAccent] : [Colors.deepOrange, Colors.orangeAccent], begin: Alignment.topCenter, end: Alignment.bottomCenter), borderRadius: BorderRadius.circular(10))),
+                Center(child: RotatedBox(quarterTurns: 3, child: Text(_isReversing ? "REV BOOST" : "TAP TO BOOST", style: const TextStyle(letterSpacing: 1, fontWeight: FontWeight.w900, color: Colors.white24)))),
               ],
             ),
           ),
@@ -286,54 +390,19 @@ class _ControlScreenState extends State<ControlScreen> {
   }
 
   Widget _buildRectButton({required String label, required bool active, required VoidCallback onTap, Color activeColor = Colors.greenAccent}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 80, 
-        padding: const EdgeInsets.symmetric(vertical: 8), 
-        decoration: BoxDecoration(
-          color: active ? activeColor.withOpacity(0.2) : Colors.white.withOpacity(0.05), 
-          borderRadius: BorderRadius.circular(8), 
-          border: Border.all(color: active ? activeColor : Colors.white24, width: 1.5)
-        ), 
-        child: Center(
-          child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14))
-        )
-      )
-    );
+    return GestureDetector(onTap: onTap, child: Container(width: 80, padding: const EdgeInsets.symmetric(vertical: 8), decoration: BoxDecoration(color: active ? activeColor.withOpacity(0.2) : Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(8), border: Border.all(color: active ? activeColor : Colors.white24, width: 1.5)), child: Center(child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14)))));
   }
 
   Widget _buildCircularButton({IconData? icon, String? label, required bool active, required Color color, required VoidCallback onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 40, height: 40,
-        decoration: BoxDecoration(
-          color: active ? color.withOpacity(0.2) : Colors.white.withOpacity(0.05),
-          shape: BoxShape.circle,
-          border: Border.all(color: active ? color : Colors.white24, width: 1.5)
-        ),
-        child: Center(
-          child: icon != null 
-            ? Icon(icon, color: active ? color : Colors.white, size: 20)
-            : Text(label ?? "", style: TextStyle(color: active ? color : Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
-        ),
-      ),
-    );
+    return GestureDetector(onTap: onTap, child: Container(width: 40, height: 40, decoration: BoxDecoration(color: active ? color.withOpacity(0.2) : Colors.white.withOpacity(0.05), shape: BoxShape.circle, border: Border.all(color: active ? color : Colors.white24, width: 1.5)), child: Center(child: icon != null ? Icon(icon, color: active ? color : Colors.white, size: 20) : Text(label ?? "", style: TextStyle(color: active ? color : Colors.white, fontWeight: FontWeight.bold, fontSize: 12)))));
   }
 
   Widget _buildTrimPanel() {
-    return Container(width: 320, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.8), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.white10)), child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("STEERING TRIM", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)), Slider(value: _trimValue, min: -15, max: 15, divisions: 300, activeColor: Colors.greenAccent, label: _trimValue.toStringAsFixed(1), onChanged: (val) { setState(() => _trimValue = val); _saveTrimValue(val); }), Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [IconButton(onPressed: () => setState(() => _trimValue = (_trimValue - 0.1).clamp(-15.0, 15.0)), icon: const Icon(Icons.remove, color: Colors.greenAccent)), TextButton(onPressed: () => setState(() => _trimValue = 0.0), child: const Text("RESET")), IconButton(onPressed: () => setState(() => _trimValue = (_trimValue + 0.1).clamp(-15.0, 15.0)), icon: const Icon(Icons.add, color: Colors.greenAccent))])]));
+    return Container(width: 320, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.8), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.white10)), child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("STEERING TRIM", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)), Slider(value: _trimValue, min: -15, max: 15, divisions: 300, activeColor: Colors.greenAccent, label: _trimValue.toStringAsFixed(1), onChanged: (val) { setState(() => _trimValue = val); _saveTrimValue(val); }), Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [IconButton(onPressed: () => setState(() { _trimValue = (_trimValue - 0.1).clamp(-15.0, 15.0); _saveTrimValue(_trimValue); }), icon: const Icon(Icons.remove, color: Colors.greenAccent)), TextButton(onPressed: () => setState(() { _trimValue = 0.0; _saveTrimValue(0.0); }), child: const Text("RESET")), IconButton(onPressed: () => setState(() { _trimValue = (_trimValue + 0.1).clamp(-15.0, 15.0); _saveTrimValue(_trimValue); }), icon: const Icon(Icons.add, color: Colors.greenAccent))])]));
   }
 
   Widget _buildThrottleControl() {
     return Row(children: [const Column(children: [Text("F", style: TextStyle(color: Colors.greenAccent)), SizedBox(height: 140), Text("R", style: TextStyle(color: Colors.redAccent))]), const SizedBox(width: 15), GestureDetector(onVerticalDragUpdate: (details) { setState(() { _throttleRaw -= details.delta.dy / 100; _throttleRaw = _throttleRaw.clamp(-1.0, 1.0); }); }, onVerticalDragEnd: (_) { setState(() => _throttleRaw = 0.0); }, child: Container(height: 205, width: 50, decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white10, width: 2)), child: Stack(alignment: Alignment.center, children: [Positioned(bottom: _throttleRaw >= 0 ? 100 : 100 + (_throttleRaw * 100), child: Container(width: 50, height: (_throttleRaw.abs() * 100), color: _throttleRaw >= 0 ? Colors.greenAccent.withOpacity(0.3) : Colors.redAccent.withOpacity(0.3))), Container(height: 1, width: 50, color: Colors.white24), Positioned(bottom: 85 + (_throttleRaw * 85), child: Container(width: 46, height: 30, decoration: BoxDecoration(color: _throttleRaw >= 0 ? Colors.greenAccent : Colors.redAccent, borderRadius: BorderRadius.circular(4)), child: const Icon(Icons.unfold_more, color: Colors.black87)))])))]);
-  }
-
-  Widget _buildSignalBattery() {
-    int percentage = ((_rssi + 100) * 2).clamp(0, 100);
-    Color color = percentage > 60 ? Colors.greenAccent : percentage > 30 ? Colors.orangeAccent : Colors.redAccent;
-    return Row(children: [Icon(Icons.wifi, color: color, size: 20), const SizedBox(width: 5), Text(_isConnected ? "$percentage%" : "OFFLINE", style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold))]);
   }
 }
 
@@ -345,9 +414,9 @@ class SpeedometerPainter extends CustomPainter {
     final center = Offset(size.width / 2, size.height);
     final rect = Rect.fromCircle(center: center, radius: size.width * 0.5);
     final trackPaint = Paint()..color = Colors.white10..style = PaintingStyle.stroke..strokeWidth = 10..strokeCap = StrokeCap.round;
-    canvas.drawArc(rect, 3.14, 3.14, false, trackPaint);
+    canvas.drawArc(rect, pi, pi, false, trackPaint);
     final progressPaint = Paint()..color = speed > 90 ? Colors.redAccent : Colors.greenAccent..style = PaintingStyle.stroke..strokeWidth = 10..strokeCap = StrokeCap.round;
-    canvas.drawArc(rect, 3.14, (speed / 120) * 3.14, false, progressPaint);
+    canvas.drawArc(rect, pi, (speed / 120) * pi, false, progressPaint);
   }
   @override bool shouldRepaint(SpeedometerPainter oldDelegate) => oldDelegate.speed != speed;
 }
