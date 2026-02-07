@@ -35,7 +35,13 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
   double _steeringAngle = 0.0;
   double _throttleRaw = 0.0; 
   double _trimValue = 0.0;
+  
+  // Updated: Steering Limit Variables with wider range
+  double _leftLimit = 68.0;   
+  double _rightLimit = 112.0; 
   bool _showTrimSlider = false;
+  bool _showLimitSlider = false; 
+
   int _headlightStage = 0; 
   bool _parkingLightsOn = false;
   bool _spoilerUp = false;
@@ -70,7 +76,7 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
   @override
   void initState() {
     super.initState();
-    _loadTrimValue();
+    _loadSettings();
     _startDiscovery();
     _setupControlSocket(); 
 
@@ -101,14 +107,20 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
   }
 
   // --- PERSISTENCE ---
-  Future<void> _loadTrimValue() async {
+  Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() => _trimValue = prefs.getDouble('steering_trim') ?? 0.0);
+    setState(() {
+      _trimValue = prefs.getDouble('steering_trim') ?? 0.0;
+      _leftLimit = prefs.getDouble('left_limit') ?? 68.0;
+      _rightLimit = prefs.getDouble('right_limit') ?? 112.0;
+    });
   }
 
-  Future<void> _saveTrimValue(double value) async {
+  Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('steering_trim', value);
+    await prefs.setDouble('steering_trim', _trimValue);
+    await prefs.setDouble('left_limit', _leftLimit);
+    await prefs.setDouble('right_limit', _rightLimit);
   }
 
   // --- NITRO LOGIC ---
@@ -210,9 +222,10 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
   double get servoAngle {
     double center = 90.0 + _trimValue;
     double normalizedStick = (_steeringAngle / 2.0).clamp(-1.0, 1.0);
+    
     return (normalizedStick < 0) 
-        ? center + (normalizedStick * (center - 68.0))
-        : center + (normalizedStick * (112.0 - center));
+        ? center + (normalizedStick * (center - _leftLimit))
+        : center + (normalizedStick * (_rightLimit - center));
   }
 
   Future<void> _sendUDP() async {
@@ -225,13 +238,14 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
 
   @override
   Widget build(BuildContext context) {
-    bool leftActive = servoAngle <= 76.0;
-    bool rightActive = servoAngle >= 106.0;
+    bool leftActive = servoAngle <= (_leftLimit + 8);
+    bool rightActive = servoAngle >= (_rightLimit - 8);
 
     return Scaffold(
       backgroundColor: const Color(0xff1d271d),
       body: Stack(
         children: [
+          // TOP LEFT: Signal & Steering Limits Toggle
           Positioned(
             top: 15, left: 15, 
             child: Column(
@@ -240,12 +254,23 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
                 Text("IP: $_espIP", style: const TextStyle(fontSize: 9, color: Colors.white24, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 5),
                 _buildSignalIndicator(),
+                const SizedBox(height: 10),
+                _buildRectButtonSmall(
+                  label: "STEERING LIMITS", 
+                  active: _showLimitSlider, 
+                  onTap: () => setState(() {
+                    _showLimitSlider = !_showLimitSlider;
+                    if (_showLimitSlider) _showTrimSlider = false;
+                  })
+                ),
               ],
             ),
           ),
 
+          // TOP CENTER: Telemetry
           Positioned(top: 20, left: 0, right: 0, child: Center(child: Container(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 6), decoration: BoxDecoration(color: _isConnected ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2), borderRadius: BorderRadius.circular(20)), child: Text("PWM: ${throttlePWM.toStringAsFixed(0)} | STEER: ${servoAngle.toStringAsFixed(1)}°", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))))),
           
+          // TOP RIGHT: Control Grid
           Positioned(
             top: 40, right: 30,
             child: Row(
@@ -268,7 +293,6 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // HORN BUTTON - MOMENTARY BEHAVIOR
                         GestureDetector(
                           onTapDown: (_) => setState(() => _s1Active = true),
                           onTapUp: (_) => setState(() => _s1Active = false),
@@ -286,7 +310,10 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
                 const SizedBox(width: 15),
                 Column(
                   children: [
-                    _buildRectButton(label: "TRIM", active: _showTrimSlider, onTap: () => setState(() => _showTrimSlider = !_showTrimSlider)),
+                    _buildRectButton(label: "TRIM", active: _showTrimSlider, onTap: () => setState(() {
+                      _showTrimSlider = !_showTrimSlider;
+                      if (_showTrimSlider) _showLimitSlider = false;
+                    })),
                     const SizedBox(height: 12),
                     _buildRectButton(label: "AUTO", active: _autoActive, activeColor: Colors.orangeAccent, onTap: () { 
                       setState(() { 
@@ -301,8 +328,11 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
             ),
           ),
 
+          // Center Panels
           if (_showTrimSlider) Center(child: _buildTrimPanel()),
+          if (_showLimitSlider) Center(child: _buildLimitPanel()),
 
+          // Speedometer
           Positioned(
             bottom: 20, left: 0, right: 0, 
             child: Center(
@@ -318,8 +348,10 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
             ),
           ),
 
+          // Steering Wheel
           Positioned(bottom: 30, left: 70, child: GestureDetector(onPanUpdate: (details) { setState(() { _steeringAngle += details.delta.dx / 60; _steeringAngle = _steeringAngle.clamp(-2.0, 2.0); }); }, onPanEnd: (_) { setState(() => _steeringAngle = 0.0); }, child: Transform.rotate(angle: _steeringAngle, child: SizedBox(width: 180, height: 180, child: Image.asset('images/steering_wheel.png', fit: BoxFit.contain))))),
 
+          // Throttle / Brake / Reverse
           Positioned(
             bottom: 30, 
             right: 80, 
@@ -353,6 +385,35 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
           ),
         ],
       ),
+    );
+  }
+
+  // LIMIT PANEL: Updated range 45 to 135
+  Widget _buildLimitPanel() {
+    return Container(
+      width: 350, 
+      padding: const EdgeInsets.all(20), 
+      decoration: BoxDecoration(color: Colors.black.withOpacity(0.9), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.cyanAccent.withOpacity(0.3))), 
+      child: Column(
+        mainAxisSize: MainAxisSize.min, 
+        children: [
+          const Text("STEERING LIMITS (EPA)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.cyanAccent)),
+          const SizedBox(height: 10),
+          Text("MAX LEFT: ${_leftLimit.toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12)),
+          Slider(value: _leftLimit, min: 45, max: 85, activeColor: Colors.cyanAccent, onChanged: (val) {
+            setState(() => _leftLimit = val);
+            _saveSettings();
+          }),
+          Text("MAX RIGHT: ${_rightLimit.toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12)),
+          Slider(value: _rightLimit, min: 95, max: 135, activeColor: Colors.cyanAccent, onChanged: (val) {
+            setState(() => _rightLimit = val);
+            _saveSettings();
+          }),
+          TextButton(onPressed: () => setState(() {
+             _leftLimit = 68.0; _rightLimit = 112.0; _saveSettings();
+          }), child: const Text("RESET DEFAULTS", style: TextStyle(color: Colors.redAccent))),
+        ]
+      )
     );
   }
 
@@ -393,12 +454,16 @@ class _ControlScreenState extends State<ControlScreen> with SingleTickerProvider
     return GestureDetector(onTap: onTap, child: Container(width: 80, padding: const EdgeInsets.symmetric(vertical: 8), decoration: BoxDecoration(color: active ? activeColor.withOpacity(0.2) : Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(8), border: Border.all(color: active ? activeColor : Colors.white24, width: 1.5)), child: Center(child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14)))));
   }
 
+  Widget _buildRectButtonSmall({required String label, required bool active, required VoidCallback onTap}) {
+    return GestureDetector(onTap: onTap, child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: active ? Colors.cyanAccent.withOpacity(0.2) : Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(4), border: Border.all(color: active ? Colors.cyanAccent : Colors.white10)), child: Text(label, style: TextStyle(color: active ? Colors.cyanAccent : Colors.white38, fontSize: 8, fontWeight: FontWeight.bold))));
+  }
+
   Widget _buildCircularButton({IconData? icon, String? label, required bool active, required Color color, required VoidCallback onTap}) {
     return GestureDetector(onTap: onTap, child: Container(width: 40, height: 40, decoration: BoxDecoration(color: active ? color.withOpacity(0.2) : Colors.white.withOpacity(0.05), shape: BoxShape.circle, border: Border.all(color: active ? color : Colors.white24, width: 1.5)), child: Center(child: icon != null ? Icon(icon, color: active ? color : Colors.white, size: 20) : Text(label ?? "", style: TextStyle(color: active ? color : Colors.white, fontWeight: FontWeight.bold, fontSize: 12)))));
   }
 
   Widget _buildTrimPanel() {
-    return Container(width: 320, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.8), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.white10)), child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("STEERING TRIM", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)), Slider(value: _trimValue, min: -15, max: 15, divisions: 300, activeColor: Colors.greenAccent, label: _trimValue.toStringAsFixed(1), onChanged: (val) { setState(() => _trimValue = val); _saveTrimValue(val); }), Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [IconButton(onPressed: () => setState(() { _trimValue = (_trimValue - 0.1).clamp(-15.0, 15.0); _saveTrimValue(_trimValue); }), icon: const Icon(Icons.remove, color: Colors.greenAccent)), TextButton(onPressed: () => setState(() { _trimValue = 0.0; _saveTrimValue(0.0); }), child: const Text("RESET")), IconButton(onPressed: () => setState(() { _trimValue = (_trimValue + 0.1).clamp(-15.0, 15.0); _saveTrimValue(_trimValue); }), icon: const Icon(Icons.add, color: Colors.greenAccent))])]));
+    return Container(width: 320, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.8), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.white10)), child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("STEERING TRIM", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)), Slider(value: _trimValue, min: -15, max: 15, divisions: 300, activeColor: Colors.greenAccent, label: _trimValue.toStringAsFixed(1), onChanged: (val) { setState(() => _trimValue = val); _saveSettings(); }), Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [IconButton(onPressed: () => setState(() { _trimValue = (_trimValue - 0.1).clamp(-15.0, 15.0); _saveSettings(); }), icon: const Icon(Icons.remove, color: Colors.greenAccent)), TextButton(onPressed: () => setState(() { _trimValue = 0.0; _saveSettings(); }), child: const Text("RESET")), IconButton(onPressed: () => setState(() { _trimValue = (_trimValue + 0.1).clamp(-15.0, 15.0); _saveSettings(); }), icon: const Icon(Icons.add, color: Colors.greenAccent))])]));
   }
 
   Widget _buildThrottleControl() {
