@@ -1,40 +1,79 @@
-#include <ESP8266WiFi.h> 
+#include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <Servo.h>
 
-const char* ssid = "Galaxy M51A0C4";
-const char* password = "VGyk@#2002";
+#define MOTOR_PIN 5       // D1-GPIO5
+#define SERVO_PIN 4       // D2-GPIO4
+#define SPOILER_PIN 0     // D3-GPIO0
+#define HORN_PIN 2        // D4-GPIO2
+#define HEAD_LIGHTS 12    // D6-GPIO12
+#define BAR_LIGHTS 13     // D7-GPIO13
+#define BOOSTER_LIGHTS 15 // D8-GPIO15
+#define RED_LIGHTS 1      // TX-GPIO1
+
+// Data packet
+struct DataPacket
+{
+  uint16_t throttlePWM;
+  float steerAngle;
+  uint8_t headLights : 2;
+  uint8_t parkingLights : 1;
+  uint8_t spoilerState : 1;
+  uint8_t brakeActive : 1;
+  uint8_t hornActive : 1;
+  uint8_t s2Active : 1;
+  uint8_t s3Active : 1;
+};
+
+String extractValue(String data, String key);
+void parseIncomingData(String sData, DataPacket *data);
+void SystemInit(void);
+void Control(DataPacket *rxData);
+
+Servo servo;        // create servo object to control a servo
+Servo motor;        // for controlling the esc of the motor
+Servo spoiler;      // for controlling the spoiler servo
+DataPacket gRxData; // used to store the received data
+
+const char *ssid = "Galaxy M51A0C4";
+const char *password = "VGyk@#2002";
 
 WiFiUDP udp;
-Servo spoilerServo; 
 unsigned int localPort = 8888;
-unsigned int broadcastPort = 8889; 
+unsigned int broadcastPort = 8889;
 unsigned long lastBroadcast = 0;
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
-  spoilerServo.attach(14); // Pin D5
-  
+
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  
-  while (WiFi.status() != WL_CONNECTED) {
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
     delay(500);
     Serial.print(".");
   }
-  
+
   Serial.println("\n✅ WiFi OK");
-  Serial.print("IP: "); Serial.println(WiFi.localIP());
-  
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+
   udp.begin(localPort);
+
+  // Do the System Initialization
+  SystemInit();
 }
 
-void loop() {
-  // 1. DYNAMIC BROADCAST (Finds the subnet automatically)
-  if (millis() - lastBroadcast > 2000) {
+void loop()
+{
+  // 1. DYNAMIC BROADCAST
+  if (millis() - lastBroadcast > 10)
+  {
     IPAddress ip = WiFi.localIP();
-    IPAddress broadcastIP(ip[0], ip[1], ip[2], 255); 
-    
+    IPAddress broadcastIP(ip[0], ip[1], ip[2], 255);
+
     udp.beginPacket(broadcastIP, broadcastPort);
     udp.print("ESP_DISCOVERY");
     udp.endPacket();
@@ -43,26 +82,77 @@ void loop() {
 
   // 2. LISTEN FOR COMMANDS
   int size = udp.parsePacket();
-  if (size > 0) {
+  if (size > 0)
+  {
     char buffer[255];
     int len = udp.read(buffer, 255);
-    if (len > 0) {
+    if (len > 0)
+    {
       buffer[len] = 0;
       String data = String(buffer);
-      Serial.println("Cmd: " + data);
+
+      // DECODE THE STRING HERE
+      parseIncomingData(data, &gRxData);
 
       // Reply RSSI
       udp.beginPacket(udp.remoteIP(), udp.remotePort());
       udp.print("RSSI:" + String(WiFi.RSSI()));
       udp.endPacket();
 
-      // FIXED: Using indexOf() instead of contains()
-      if (data.indexOf("W:1") != -1) {
-        spoilerServo.write(180); // Spoiler Up
-      } else if (data.indexOf("W:0") != -1) {
-        spoilerServo.write(0);   // Spoiler Down
-      }
+      // Control Code will come here
+      Control(&gRxData);
     }
   }
-  yield();
+}
+
+// --- HELPER FUNCTION: Extracts value between a Key and a Comma ---
+String extractValue(String data, String key)
+{
+  int keyPos = data.indexOf(key);
+  if (keyPos == -1)
+    return "0";
+  int startPos = keyPos + key.length();
+  int endPos = data.indexOf(",", startPos);
+  if (endPos == -1)
+    endPos = data.length();
+  return data.substring(startPos, endPos);
+}
+
+// --- NEW FUNCTION: Decodes the string into variables ---
+void parseIncomingData(String sData, DataPacket *data)
+{
+  data->steerAngle = extractValue(sData, "S:").toFloat();
+  data->throttlePWM = extractValue(sData, "T:").toInt();
+  data->headLights = extractValue(sData, "L:").toInt();
+  data->parkingLights = extractValue(sData, "P:").toInt();
+  data->spoilerState = extractValue(sData, "W:").toInt();
+  data->brakeActive = extractValue(sData, "B:").toInt();
+  data->hornActive = extractValue(sData, "H:").toInt();
+  data->s2Active = extractValue(sData, "S2:").toInt();
+  data->s3Active = extractValue(sData, "S3:").toInt();
+}
+
+void SystemInit(void)
+{
+
+  servo.attach(SERVO_PIN);
+  motor.attach(MOTOR_PIN);
+  spoiler.attach(SPOILER_PIN);
+  pinMode(HEAD_LIGHTS, OUTPUT);
+  pinMode(BAR_LIGHTS, OUTPUT);
+  pinMode(RED_LIGHTS, OUTPUT);
+  pinMode(BOOSTER_LIGHTS, OUTPUT);
+
+  // Motor ESC Calibration
+  motor.writeMicroseconds(1500);
+  delay(2000);
+}
+
+void Control(DataPacket *rxData)
+{
+  // Write the Throttle to the motor
+  motor.writeMicroseconds(rxData->throttlePWM);
+
+  // Write the steering angle
+  servo.write(int(rxData->steerAngle));
 }
