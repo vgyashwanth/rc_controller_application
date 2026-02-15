@@ -2,6 +2,9 @@
 #include <WiFiUdp.h>
 #include <Servo.h>
 
+// debug mode enable
+// #define DEBUG_MODE 
+
 #define MOTOR_PIN 5       // D1-GPIO5
 #define SERVO_PIN 4       // D2-GPIO4
 #define SPOILER_PIN 0     // D3-GPIO0
@@ -21,6 +24,7 @@ struct DataPacket
   uint8_t spoilerState : 1;
   uint8_t brakeActive : 1;
   uint8_t hornActive : 1;
+  uint8_t reverseActive : 1;
   uint8_t s2Active : 1;
   uint8_t s3Active : 1;
 };
@@ -29,6 +33,7 @@ String extractValue(String data, String key);
 void parseIncomingData(String sData, DataPacket *data);
 void SystemInit(void);
 void Control(DataPacket *rxData);
+void PrintReceivedData(DataPacket *data);
 
 Servo servo;        // create servo object to control a servo
 Servo motor;        // for controlling the esc of the motor
@@ -91,8 +96,15 @@ void loop()
       buffer[len] = 0;
       String data = String(buffer);
 
+      #if defined(DEBUG_MODE)
+      Serial.println("CMD :" + data);
+      #endif
       // DECODE THE STRING HERE
       parseIncomingData(data, &gRxData);
+
+      #if defined(DEBUG_MODE)
+      PrintReceivedData(&gRxData);
+      #endif
 
       // Reply RSSI
       udp.beginPacket(udp.remoteIP(), udp.remotePort());
@@ -127,6 +139,7 @@ void parseIncomingData(String sData, DataPacket *data)
   data->parkingLights = extractValue(sData, "P:").toInt();
   data->spoilerState = extractValue(sData, "W:").toInt();
   data->brakeActive = extractValue(sData, "B:").toInt();
+  data->reverseActive = extractValue(sData, "REV:").toInt(); 
   data->hornActive = extractValue(sData, "H:").toInt();
   data->s2Active = extractValue(sData, "S2:").toInt();
   data->s3Active = extractValue(sData, "S3:").toInt();
@@ -140,7 +153,10 @@ void SystemInit(void)
   spoiler.attach(SPOILER_PIN);
   pinMode(HEAD_LIGHTS, OUTPUT);
   pinMode(BAR_LIGHTS, OUTPUT);
-  pinMode(RED_LIGHTS, OUTPUT);
+  #if defined(DEBUG_MODE)
+  #else
+  pinMode(RED_LIGHTS, OUTPUT); // this is TXpin
+  #endif
   pinMode(BOOSTER_LIGHTS, OUTPUT);
 
   // Motor ESC Calibration
@@ -155,4 +171,27 @@ void Control(DataPacket *rxData)
 
   // Write the steering angle
   servo.write(int(rxData->steerAngle));
+}
+
+
+void PrintReceivedData(DataPacket *data)
+{
+  // Serial printing for debugging the extracted values
+  Serial.println("--- Incoming Control Data ---");
+
+  Serial.print("Steer: "); Serial.print(data->steerAngle);
+  Serial.print(" | PWM: "); Serial.print(data->throttlePWM);
+  Serial.print(" | REV: "); Serial.println(data->reverseActive ? "YES" : "NO");
+
+  Serial.print("Brake: "); Serial.print(data->brakeActive ? "ON" : "OFF");
+  Serial.print(" | Headlights: "); Serial.print(data->headLights);
+  Serial.print(" | Parking: "); Serial.println(data->parkingLights ? "ON" : "OFF");
+
+  Serial.print("Spoiler: "); Serial.print(data->spoilerState ? "UP" : "DOWN");
+  Serial.print(" | Horn: "); Serial.print(data->hornActive ? "ACTIVE" : "OFF");
+  Serial.print(" | S2: "); Serial.print(data->s2Active);
+  Serial.print(" | S3: "); Serial.println(data->s3Active);
+
+  Serial.println("-----------------------------");
+
 }
