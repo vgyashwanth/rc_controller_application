@@ -18,8 +18,7 @@ class RCCarApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      // FIXED: Corrected parameter name here
-      debugShowCheckedModeBanner: false, 
+      debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
       home: const ControlScreen(),
     );
@@ -39,6 +38,9 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   double _throttleRaw = 0.0; 
   double _trimValue = 0.0;
   double _currentSpeed = 0.0;
+
+  // --- NEW: Momentum Memory ---
+  double _lastPWMBeforeNeutral = 1500.0; 
 
   // --- Steering Config ---
   double _leftLimit = 68.0;   
@@ -72,7 +74,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   // --- Gearbox & Momentum Engine ---
   int _gearStage = 0; 
   double _animatedManualPWM = 1500.0;
-  double _dischargeRate = 5.0; 
+  double _dischargeRate = 2.5; 
   late AnimationController _manualController;
   late Animation<double> _manualAnimation;
   bool _isManualThrottlePressed = false;
@@ -109,12 +111,8 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
       if (_espIP != '0.0.0.0') _sendUDP();
 
       setState(() {
-        // --- MOMENTUM LOGIC ---
         if (!_isManualThrottlePressed && !_isBraking && _manualModeActive) {
-          // If discharge rate is 20, decayStep is 0.75 per 50ms. 
-          // (500 units / 0.75) * 50ms = ~33 seconds to stop. Very heavy!
           double decayStep = (15.0 / _dischargeRate).clamp(0.1, 100.0);
-          
           if (_animatedManualPWM > 1505) {
             _animatedManualPWM -= decayStep;
           } else if (_animatedManualPWM < 1495) {
@@ -124,7 +122,6 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
           }
         }
 
-        // --- SPEEDOMETER ---
         double targetSpeed = 0.0;
         if (_isBraking) {
           targetSpeed = 0.0;
@@ -180,7 +177,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
       _steeringSensitivity = prefs.getDouble('steer_sens') ?? 1.0;
       _centeringSpeed = (prefs.getDouble('center_speed') ?? 20.0).clamp(10.0, 30.0);
       _maxBrakeDuration = prefs.getDouble('max_brake_dur') ?? 0.5;
-      _dischargeRate = (prefs.getDouble('momentum_rate') ?? 5.0).clamp(0.1, 20.0);
+      _dischargeRate = (prefs.getDouble('momentum_rate') ?? 2.5).clamp(0.1, 5.0);
     });
   }
 
@@ -212,6 +209,8 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   void _releaseManualThrottle() {
     setState(() {
       _isManualThrottlePressed = false;
+      // Capture momentum before releasing manual throttle
+      _lastPWMBeforeNeutral = _animatedManualPWM;
       _manualController.removeListener(_updatePWMFromAnimation);
       _manualController.stop(); 
     });
@@ -220,6 +219,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   void _startDiscovery() async { _discoverySocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, _discoveryPort); _discoverySocket?.listen((RawSocketEvent event) { if (event == RawSocketEvent.read) { Datagram? dg = _discoverySocket?.receive(); if (dg != null) { String msg = String.fromCharCodes(dg.data); if (msg == "ESP_DISCOVERY") setState(() => _espIP = dg.address.address); } } }); }
   void _setupControlSocket() async { _controlSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0); _controlSocket?.listen((RawSocketEvent event) { if (event == RawSocketEvent.read) { Datagram? dg = _controlSocket?.receive(); if (dg != null) { String response = String.fromCharCodes(dg.data); if (response.startsWith("RSSI:")) { setState(() { _rssi = int.tryParse(response.split(":")[1]) ?? 0; _isConnected = true; }); _connTimeout?.cancel(); _connTimeout = Timer(const Duration(seconds: 3), () { setState(() { _isConnected = false; _rssi = 0; }); }); } } } }); }
   
+  // --- UPDATED PWM LOGIC ---
   double get currentThrottlePWM {
     if (_isBraking) return _brakeOverridePWM.toDouble();
     if (_manualModeActive) return _animatedManualPWM;
@@ -234,7 +234,16 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   
   Future<void> _sendUDP() async { if (_controlSocket == null || _espIP == '0.0.0.0') return; try { String data = "S:${servoAngle.toStringAsFixed(1)},T:${currentThrottlePWM.toStringAsFixed(0)},L:$_headlightStage,P:${_parkingLightsOn ? 1 : 0},W:${_spoilerUp ? 1 : 0},B:${_isBraking ? 1 : 0},H:${_s1Active ? 1 : 0},S2:${_s2Active ? 1 : 0},S3:${_s3Active ? 1 : 0},REV:${_isReversing ? 1 : 0}"; _controlSocket?.send(Uint8List.fromList(data.codeUnits), InternetAddress(_espIP), _udpPort); } catch (e) { debugPrint('UDP Error: $e'); } }
 
-  void _stopBrakePulse() { _brakePulseTimer?.cancel(); setState(() { _isBraking = false; _brakeOverridePWM = 1500; _animatedManualPWM = 1500; }); }
+  void _stopBrakePulse() { 
+    _brakePulseTimer?.cancel(); 
+    setState(() { 
+      _isBraking = false; 
+      _brakeOverridePWM = 1500; 
+      if (_manualModeActive) _animatedManualPWM = 1500; 
+      // Reset the memory after brake is released
+      _lastPWMBeforeNeutral = 1500;
+    }); 
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -242,7 +251,6 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
       backgroundColor: const Color(0xff1d271d),
       body: Stack(
         children: [
-          // Sidebar
           Positioned(
             top: 15, left: 15, 
             child: Column(
@@ -263,10 +271,8 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
             ),
           ),
 
-          // HUD
           Positioned(top: 20, left: 0, right: 70, child: Center(child: _buildHUD())),
 
-          // Top Right Controls
           Positioned(
             top: 40, right: 30,
             child: Row(
@@ -280,7 +286,6 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
             ),
           ),
 
-          // Overlays
           if (_showTrimSlider) Center(child: _buildTrimPanel()),
           if (_showLimitSlider) Center(child: _buildLimitPanel()),
           if (_showParamPanel) Center(child: _buildParamPanel()),
@@ -294,8 +299,6 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
       ),
     );
   }
-
-  // --- Panels & Components ---
 
   void _togglePanel(String panel) {
     setState(() {
@@ -374,6 +377,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
     );
   }
 
+  // --- UPDATED BRAKE BUTTON WITH MOMENTUM MEMORY ---
   Widget _buildBrakeAndReverse() {
     return Column(children: [
       if (_manualModeActive) GestureDetector(
@@ -386,13 +390,26 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
           setState(() { 
             _isBraking = true;
             _brakePulseTimer?.cancel();
-            double diff = (_animatedManualPWM - 1500).abs();
-            if (diff > 30) {
-              bool wasMovingForward = _animatedManualPWM > 1500;
-              int durationMs = ((diff / 500.0) * _maxBrakeDuration * 1000).toInt(); 
+            
+            // USE THE MEMORY: _lastPWMBeforeNeutral
+            double speedDiff = (_lastPWMBeforeNeutral - 1500).abs();
+            
+            if (speedDiff > 30) {
+              bool wasMovingForward = _lastPWMBeforeNeutral > 1500;
+              // Map how long to brake based on how fast we were going
+              int durationMs = ((speedDiff / 500.0) * _maxBrakeDuration * 1000).toInt(); 
+              
               _brakeOverridePWM = wasMovingForward ? 1000 : 2000;
-              _brakePulseTimer = Timer(Duration(milliseconds: durationMs), () { setState(() { _brakeOverridePWM = 1500; _animatedManualPWM = 1500; }); });
-            } else { _brakeOverridePWM = 1500; }
+              
+              _brakePulseTimer = Timer(Duration(milliseconds: durationMs), () { 
+                setState(() { 
+                  _brakeOverridePWM = 1500; 
+                  if (_manualModeActive) _animatedManualPWM = 1500;
+                }); 
+              });
+            } else { 
+              _brakeOverridePWM = 1500; 
+            }
           }); 
         },
         onTapUp: (_) => _stopBrakePulse(),
@@ -413,8 +430,8 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
           const SizedBox(height: 20),
           Text("${_dischargeRate.toStringAsFixed(1)} (Inertia Intensity)", style: const TextStyle(fontSize: 12, color: Colors.white70)),
           const SizedBox(height: 10),
-          Slider(value: _dischargeRate, min: 0.1, max: 20.0, divisions: 199, activeColor: Colors.yellowAccent, onChanged: (val) { setState(() => _dischargeRate = val); _saveSettings(); }),
-          const Text("Move to 20 for extreme roll-off", style: TextStyle(fontSize: 9, color: Colors.white38)),
+          Slider(value: _dischargeRate, min: 0.1, max: 5.0, divisions: 49, activeColor: Colors.yellowAccent, onChanged: (val) { setState(() => _dischargeRate = val); _saveSettings(); }),
+          const Text("Lower = More Momentum", style: TextStyle(fontSize: 9, color: Colors.white38)),
         ],
       ),
     );
@@ -450,18 +467,69 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
     );
   }
 
-  // --- Helpers ---
   Widget _buildSignalIndicator() { int percentage = ((_rssi + 100) * 2).clamp(0, 100); Color color = percentage > 60 ? Colors.greenAccent : percentage > 30 ? Colors.orangeAccent : Colors.redAccent; return Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.wifi, color: color, size: 16), const SizedBox(width: 5), Text(_isConnected ? "$percentage%" : "OFFLINE", style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.bold))]); }
   Widget _buildRectButtonSmall({required String label, required bool active, required VoidCallback onTap, Color activeColor = Colors.cyanAccent}) { return GestureDetector(onTap: onTap, child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: active ? activeColor.withOpacity(0.2) : Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(4), border: Border.all(color: active ? activeColor : Colors.white10)), child: Text(label, style: TextStyle(color: active ? activeColor : Colors.white38, fontSize: 8, fontWeight: FontWeight.bold)))); }
   Widget _buildRectButton({required String label, required bool active, required VoidCallback onTap, Color activeColor = Colors.greenAccent}) { return GestureDetector(onTap: onTap, child: Container(width: 80, padding: const EdgeInsets.symmetric(vertical: 8), decoration: BoxDecoration(color: active ? activeColor.withOpacity(0.2) : Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(8), border: Border.all(color: active ? activeColor : Colors.white24, width: 1.5)), child: Center(child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 11))))); }
   Widget _buildCircularButton({IconData? icon, String? label, required bool active, required Color color, required VoidCallback onTap}) { return GestureDetector(onTap: onTap, child: Container(width: 40, height: 40, decoration: BoxDecoration(color: active ? color.withOpacity(0.2) : Colors.white.withOpacity(0.05), shape: BoxShape.circle, border: Border.all(color: active ? color : Colors.white24, width: 1.5)), child: Center(child: icon != null ? Icon(icon, color: active ? color : Colors.white, size: 20) : Text(label ?? "", style: TextStyle(color: active ? color : Colors.white, fontWeight: FontWeight.bold, fontSize: 12))))); }
   Widget _buildTrimPanel() { return Container(width: 320, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.8), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.white10)), child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("STEERING TRIM", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)), Slider(value: _trimValue, min: -15, max: 15, divisions: 300, activeColor: Colors.greenAccent, label: _trimValue.toStringAsFixed(1), onChanged: (val) { setState(() => _trimValue = val); _saveSettings(); }), Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [IconButton(onPressed: () => setState(() { _trimValue = (_trimValue - 0.1).clamp(-15.0, 15.0); _saveSettings(); }), icon: const Icon(Icons.remove, color: Colors.greenAccent)), TextButton(onPressed: () => setState(() { _trimValue = 0.0; _saveSettings(); }), child: const Text("RESET")), IconButton(onPressed: () => setState(() { _trimValue = (_trimValue + 0.1).clamp(-15.0, 15.0); _saveSettings(); }), icon: const Icon(Icons.add, color: Colors.greenAccent))])])); }
   Widget _buildLimitPanel() { return Container(width: 350, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.9), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.cyanAccent.withOpacity(0.3))), child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("STEERING LIMITS (EPA)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.cyanAccent)), const SizedBox(height: 10), Text("MAX LEFT: ${_leftLimit.toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12)), Slider(value: _leftLimit, min: 10, max: 85, activeColor: Colors.cyanAccent, onChanged: (val) { setState(() => _leftLimit = val); _saveSettings(); }), Text("MAX RIGHT: ${_rightLimit.toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12)), Slider(value: _rightLimit, min: 95, max: 170, activeColor: Colors.cyanAccent, onChanged: (val) { setState(() => _rightLimit = val); _saveSettings(); })])); }
-  Widget _buildParamPanel() { const double oneDegInRad = 0.0174533; return Container(width: 400, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.95), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.orangeAccent.withOpacity(0.4))), child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("STEERING PARAMETERS", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orangeAccent, letterSpacing: 1.2)), const SizedBox(height: 10), Text("ROTATION LOCK: ${(_maxRotationLimit * 57.3).toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12, color: Colors.white70)), Row(children: [IconButton(icon: const Icon(Icons.remove_circle_outline, color: Colors.orangeAccent), onPressed: () { setState(() => _maxRotationLimit = (_maxRotationLimit - oneDegInRad).clamp(0.785, 9.42)); _saveSettings(); }), Expanded(child: Slider(value: _maxRotationLimit, min: 0.785, max: 9.42, activeColor: Colors.orangeAccent, onChanged: (val) { setState(() => _maxRotationLimit = val); _saveSettings(); })), IconButton(icon: const Icon(Icons.add_circle_outline, color: Colors.orangeAccent), onPressed: () { setState(() => _maxRotationLimit = (_maxRotationLimit + oneDegInRad).clamp(0.785, 9.42)); _saveSettings(); })]), const SizedBox(height: 10), Text("SENSITIVITY: ${_steeringSensitivity.toStringAsFixed(1)}x", style: const TextStyle(fontSize: 12, color: Colors.white70)), Slider(value: _steeringSensitivity, min: 0.5, max: 2.5, divisions: 20, activeColor: Colors.orangeAccent, onChanged: (val) { setState(() => _steeringSensitivity = val); _saveSettings(); }), const SizedBox(height: 10), Text("CENTERING SPEED: ${_centeringSpeed.toStringAsFixed(1)}", style: const TextStyle(fontSize: 12, color: Colors.white70)), Slider(value: _centeringSpeed, min: 10.0, max: 30.0, divisions: 40, activeColor: Colors.orangeAccent, onChanged: (val) { setState(() => _centeringSpeed = val); _saveSettings(); })]))); }
+  
+  Widget _buildParamPanel() {
+    const double oneDegInRad = 0.0174533;
+    return Container(
+      width: 400, padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(color: Colors.black.withOpacity(0.95), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.orangeAccent.withOpacity(0.4))),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("STEERING PARAMETERS", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orangeAccent, letterSpacing: 1.2)),
+            const SizedBox(height: 10),
+            Text("ROTATION LOCK: ${(_maxRotationLimit * 57.3).toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12, color: Colors.white70)),
+            Row(children: [
+              IconButton(icon: const Icon(Icons.remove_circle_outline, color: Colors.orangeAccent), onPressed: () { setState(() => _maxRotationLimit = (_maxRotationLimit - oneDegInRad).clamp(0.785, 9.42)); _saveSettings(); }),
+              Expanded(child: Slider(value: _maxRotationLimit, min: 0.785, max: 9.42, activeColor: Colors.orangeAccent, onChanged: (val) { setState(() => _maxRotationLimit = val); _saveSettings(); })),
+              IconButton(icon: const Icon(Icons.add_circle_outline, color: Colors.orangeAccent), onPressed: () { setState(() => _maxRotationLimit = (_maxRotationLimit + oneDegInRad).clamp(0.785, 9.42)); _saveSettings(); }),
+            ]),
+            const SizedBox(height: 10),
+            Text("SENSITIVITY: ${_steeringSensitivity.toStringAsFixed(1)}x", style: const TextStyle(fontSize: 12, color: Colors.white70)),
+            Slider(value: _steeringSensitivity, min: 0.5, max: 2.5, divisions: 20, activeColor: Colors.orangeAccent, onChanged: (val) { setState(() => _steeringSensitivity = val); _saveSettings(); }),
+            const SizedBox(height: 10),
+            Text("CENTERING SPEED: ${_centeringSpeed.toStringAsFixed(1)}", style: const TextStyle(fontSize: 12, color: Colors.white70)),
+            Slider(value: _centeringSpeed, min: 10.0, max: 30.0, divisions: 40, activeColor: Colors.orangeAccent, onChanged: (val) { setState(() => _centeringSpeed = val); _saveSettings(); }),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildBrakePanel() { return Container(width: 350, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.95), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.redAccent.withOpacity(0.4))), child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("ACTIVE BRAKE DURATION", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.redAccent)), const SizedBox(height: 20), Text("${_maxBrakeDuration.toStringAsFixed(2)} Seconds @ Max Speed", style: const TextStyle(fontSize: 12, color: Colors.white70)), const SizedBox(height: 10), Slider(value: _maxBrakeDuration, min: 0.05, max: 2.0, divisions: 39, activeColor: Colors.redAccent, onChanged: (val) { setState(() => _maxBrakeDuration = val); _saveSettings(); })])); }
   Widget _buildWheelSteering() { return GestureDetector(onPanStart: (details) { _centeringTicker?.stop(); _lastElapsed = Duration.zero; final box = context.findRenderObject() as RenderBox; final Offset center = box.localToGlobal(Offset(70 + 90, MediaQuery.of(context).size.height - 30 - 90)); final Offset pos = details.globalPosition - center; _lastTouchAngle = atan2(pos.dy, pos.dx); }, onPanUpdate: (details) { final RenderBox box = context.findRenderObject() as RenderBox; final Offset center = box.localToGlobal(Offset(70 + 90, MediaQuery.of(context).size.height - 30 - 90)); final Offset currentPos = details.globalPosition - center; double currentAngle = atan2(currentPos.dy, currentPos.dx); double diff = currentAngle - _lastTouchAngle; if (diff > pi) diff -= 2 * pi; if (diff < -pi) diff += 2 * pi; setState(() { _steeringAngle = (_steeringAngle + (diff * _steeringSensitivity)).clamp(-_maxRotationLimit, _maxRotationLimit); }); _lastTouchAngle = currentAngle; }, onPanEnd: (_) { _centeringTicker?.start(); _lastTouchAngle = 0.0; }, child: Transform.rotate(angle: _steeringAngle, child: SizedBox(width: 180, height: 180, child: Image.asset('images/steering_wheel.png', fit: BoxFit.contain)))); }
   Widget _buildButtonSteering() { bool isLeftPressed = _steeringAngle <= -_maxRotationLimit; bool isRightPressed = _steeringAngle >= _maxRotationLimit; return Row(children: [GestureDetector(onTapDown: (_) { _centeringTicker?.stop(); setState(() => _steeringAngle = -_maxRotationLimit); }, onTapUp: (_) { _lastElapsed = Duration.zero; _centeringTicker?.start(); }, child: Container(width: 85, height: 85, decoration: BoxDecoration(color: isLeftPressed ? Colors.cyanAccent : Colors.cyanAccent.withOpacity(0.1), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.cyanAccent, width: 2)), child: Icon(Icons.arrow_back_ios_new, size: 40, color: isLeftPressed ? Colors.black : Colors.cyanAccent))), const SizedBox(width: 20), GestureDetector(onTapDown: (_) { _centeringTicker?.stop(); setState(() => _steeringAngle = _maxRotationLimit); }, onTapUp: (_) { _lastElapsed = Duration.zero; _centeringTicker?.start(); }, child: Container(width: 85, height: 85, decoration: BoxDecoration(color: isRightPressed ? Colors.cyanAccent : Colors.cyanAccent.withOpacity(0.1), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.cyanAccent, width: 2)), child: Icon(Icons.arrow_forward_ios, size: 40, color: isRightPressed ? Colors.black : Colors.cyanAccent)))]); }
-  Widget _buildStandardThrottle() { return Row(children: [const Column(children: [Text("F", style: TextStyle(color: Colors.greenAccent)), SizedBox(height: 140), Text("R", style: TextStyle(color: Colors.redAccent))]), const SizedBox(width: 15), GestureDetector(onVerticalDragUpdate: (details) { setState(() { _throttleRaw -= details.delta.dy / 100; _throttleRaw = _throttleRaw.clamp(-1.0, 1.0); }); }, onVerticalDragEnd: (_) { setState(() => _throttleRaw = 0.0); }, child: Container(height: 205, width: 50, decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white10, width: 2)), child: Stack(alignment: Alignment.center, children: [Positioned(bottom: _throttleRaw >= 0 ? 100 : 100 + (_throttleRaw * 100), child: Container(width: 50, height: (_throttleRaw.abs() * 100), color: _throttleRaw >= 0 ? Colors.greenAccent.withOpacity(0.3) : Colors.redAccent.withOpacity(0.3))), Container(height: 1, width: 50, color: Colors.white24), Positioned(bottom: 85 + (_throttleRaw * 85), child: Container(width: 46, height: 30, decoration: BoxDecoration(color: _throttleRaw >= 0 ? Colors.greenAccent : Colors.redAccent, borderRadius: BorderRadius.circular(4)), child: const Icon(Icons.unfold_more, color: Colors.black87)))])))]); }
+  
+  // --- UPDATED STANDARD THROTTLE: SAVES MOMENTUM ---
+  Widget _buildStandardThrottle() { 
+    return Row(children: [
+      const Column(children: [Text("F", style: TextStyle(color: Colors.greenAccent)), SizedBox(height: 140), Text("R", style: TextStyle(color: Colors.redAccent))]), 
+      const SizedBox(width: 15), 
+      GestureDetector(
+        onVerticalDragUpdate: (details) { 
+          setState(() { 
+            _throttleRaw -= details.delta.dy / 100; 
+            _throttleRaw = _throttleRaw.clamp(-1.0, 1.0); 
+            // Save the active PWM into memory as we drive
+            _lastPWMBeforeNeutral = (_throttleRaw + 1.0) * 500 + 1000;
+          }); 
+        }, 
+        onVerticalDragEnd: (_) { 
+          setState(() {
+            // Keep the memory, but set actual stick to zero
+            _throttleRaw = 0.0; 
+          });
+        }, 
+        child: Container(height: 205, width: 50, decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white10, width: 2)), child: Stack(alignment: Alignment.center, children: [Positioned(bottom: _throttleRaw >= 0 ? 100 : 100 + (_throttleRaw * 100), child: Container(width: 50, height: (_throttleRaw.abs() * 100), color: _throttleRaw >= 0 ? Colors.greenAccent.withOpacity(0.3) : Colors.redAccent.withOpacity(0.3))), Container(height: 1, width: 50, color: Colors.white24), Positioned(bottom: 85 + (_throttleRaw * 85), child: Container(width: 46, height: 30, decoration: BoxDecoration(color: _throttleRaw >= 0 ? Colors.greenAccent : Colors.redAccent, borderRadius: BorderRadius.circular(4)), child: const Icon(Icons.unfold_more, color: Colors.black87)))])))]); 
+  }
+
   Widget _buildSpeedometer() { return SizedBox(width: 180, height: 90, child: CustomPaint(painter: SpeedometerPainter(_currentSpeed), child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [Text("${_currentSpeed.toStringAsFixed(0)}", style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w900, color: Colors.white, fontStyle: FontStyle.italic)), const Text("KM/H", style: TextStyle(fontSize: 10, color: Colors.white54, fontWeight: FontWeight.bold, letterSpacing: 1.5)), const SizedBox(height: 5)]))); }
 }
 
