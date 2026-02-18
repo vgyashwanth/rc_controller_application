@@ -3,7 +3,7 @@
 #include <Servo.h>
 
 // debug mode enable
-// #define DEBUG_MODE 
+ #define DEBUG_MODE 
 
 #define MOTOR_PIN 5       // D1-GPIO5
 #define SERVO_PIN 4       // D2-GPIO4
@@ -13,6 +13,9 @@
 #define BAR_LIGHTS 13     // D7-GPIO13
 #define BOOSTER_LIGHTS 15 // D8-GPIO15
 #define RED_LIGHTS 1      // TX-GPIO1
+
+#define HORN_FREQUENCY 415 // frequency of the  Horn in Hz (McLaren 765LT)
+#define PARKING_LIGHT_FREQ 1500
 
 // Data packet
 struct DataPacket
@@ -113,6 +116,7 @@ void loop()
 
       // Control Code will come here
       Control(&gRxData);
+      
     }
   }
 }
@@ -153,6 +157,7 @@ void SystemInit(void)
   spoiler.attach(SPOILER_PIN);
   pinMode(HEAD_LIGHTS, OUTPUT);
   pinMode(BAR_LIGHTS, OUTPUT);
+  pinMode(HORN_PIN, OUTPUT);
   #if defined(DEBUG_MODE)
   #else
   pinMode(RED_LIGHTS, OUTPUT); // this is TXpin
@@ -171,6 +176,22 @@ void Control(DataPacket *rxData)
 
   // Write the steering angle
   servo.write(int(rxData->steerAngle));
+
+  // process the horn
+  if(rxData->hornActive)
+  {
+    tone(HORN_PIN, HORN_FREQUENCY, 100);
+  }
+
+  if(rxData->parkingLights)
+  {
+    tone(HORN_PIN, PARKING_LIGHT_FREQ, 100);
+    delay(500);
+    tone(HORN_PIN, PARKING_LIGHT_FREQ, 100);
+    delay(500);
+
+  }
+
 }
 
 
