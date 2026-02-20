@@ -27,6 +27,7 @@ class RCCarApp extends StatelessWidget {
 
 class ControlScreen extends StatefulWidget {
   const ControlScreen({super.key});
+
   @override
   State<ControlScreen> createState() => _ControlScreenState();
 }
@@ -39,8 +40,9 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   double _trimValue = 0.0;
   double _currentSpeed = 0.0;
 
-  // --- Momentum Memory ---
+  // --- Momentum & Timing Memory ---
   double _lastPWMBeforeNeutral = 1500.0; 
+  DateTime? _lastThrottleReleaseTime; 
 
   // --- Steering Config ---
   double _leftLimit = 68.0;   
@@ -112,10 +114,9 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
 
       setState(() {
         if (!_isManualThrottlePressed && !_isBraking && _manualModeActive) {
-          // --- FIXED DECAY LOGIC ---
           double decayStep = (15.0 / _dischargeRate).clamp(0.1, 100.0);
           if ((_animatedManualPWM - 1500).abs() <= (decayStep + 1.0)) {
-            _animatedManualPWM = 1500.0; // Snap to neutral to prevent fluctuation
+            _animatedManualPWM = 1500.0; 
           } else if (_animatedManualPWM > 1500) {
             _animatedManualPWM -= decayStep;
           } else if (_animatedManualPWM < 1500) {
@@ -211,6 +212,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
     setState(() {
       _isManualThrottlePressed = false;
       _lastPWMBeforeNeutral = _animatedManualPWM;
+      _lastThrottleReleaseTime = DateTime.now(); 
       _manualController.removeListener(_updatePWMFromAnimation);
       _manualController.stop(); 
     });
@@ -238,8 +240,9 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
     setState(() { 
       _isBraking = false; 
       _brakeOverridePWM = 1500; 
-      if (_manualModeActive) _animatedManualPWM = 1500.0; // Reset exactly to neutral
+      if (_manualModeActive) _animatedManualPWM = 1500.0; 
       _lastPWMBeforeNeutral = 1500;
+      _lastThrottleReleaseTime = null; 
     }); 
   }
 
@@ -268,9 +271,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
               ],
             ),
           ),
-
           Positioned(top: 20, left: 0, right: 70, child: Center(child: _buildHUD())),
-
           Positioned(
             top: 40, right: 30,
             child: Row(
@@ -283,13 +284,11 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
               ],
             ),
           ),
-
           if (_showTrimSlider) Center(child: _buildTrimPanel()),
           if (_showLimitSlider) Center(child: _buildLimitPanel()),
           if (_showParamPanel) Center(child: _buildParamPanel()),
           if (_showBrakePanel) Center(child: _buildBrakePanel()),
           if (_showMomentumPanel) Center(child: _buildMomentumPanel()),
-          
           Positioned(bottom: 30, left: 70, child: _isButtonSteering ? _buildButtonSteering() : _buildWheelSteering()),
           Positioned(bottom: 20, left: 0, right: 0, child: Center(child: _buildSpeedometer())),
           Positioned(bottom: 30, right: 30, child: _buildRightControlArea()),
@@ -352,7 +351,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
     return Column(children: [
       _buildRectButton(label: "TRIM", active: _showTrimSlider, onTap: () => _togglePanel('trim')), 
       const SizedBox(height: 12), 
-      _buildRectButton(label: "MANUAL", active: _manualModeActive, activeColor: Colors.orangeAccent, onTap: () { setState(() { _manualModeActive = !_manualModeActive; _isReversing = false; _gearStage = 0; _animatedManualPWM = 1500.0; }); })
+      _buildRectButton(label: "MANUAL", active: _manualModeActive, activeColor: Colors.orangeAccent, onTap: () { setState(() { _manualModeActive = !_manualModeActive; _isReversing = false; _gearStage = 0; _animatedManualPWM = 1500.0; _lastThrottleReleaseTime = null; }); })
     ]);
   }
 
@@ -387,8 +386,26 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
           setState(() { 
             _isBraking = true;
             _brakePulseTimer?.cancel();
+
+            // --- DYNAMIC WINDOW LOGIC ---
+            bool isWithinDynamicWindow = false;
+            if (_lastThrottleReleaseTime != null) {
+              // Calculate how fast we were going as a factor of 0.0 to 1.0
+              double speedIntensity = (_lastPWMBeforeNeutral - 1500).abs() / 500.0;
+              
+              // Dynamic window: if at 100% speed, window is 3s. If at 10% speed, window is 0.3s.
+              double dynamicWindowSeconds = (speedIntensity * 3.0).clamp(0.1, 3.0);
+              
+              int elapsedMs = DateTime.now().difference(_lastThrottleReleaseTime!).inMilliseconds;
+              if (elapsedMs < (dynamicWindowSeconds * 1000)) {
+                isWithinDynamicWindow = true;
+              }
+            }
+
             double speedDiff = (_lastPWMBeforeNeutral - 1500).abs();
-            if (speedDiff > 30) {
+            
+            // Only fire the pulse if we are within the dynamic time window
+            if (speedDiff > 30 && isWithinDynamicWindow) {
               bool wasMovingForward = _lastPWMBeforeNeutral > 1500;
               int durationMs = ((speedDiff / 500.0) * _maxBrakeDuration * 1000).toInt(); 
               _brakeOverridePWM = wasMovingForward ? 1000 : 2000;
@@ -399,6 +416,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
                 }); 
               });
             } else { 
+              // Window expired or car already basically stopped - don't jerk the car
               _brakeOverridePWM = 1500; 
             }
           }); 
@@ -513,6 +531,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
         onVerticalDragEnd: (_) { 
           setState(() {
             _throttleRaw = 0.0; 
+            _lastThrottleReleaseTime = DateTime.now(); 
           });
         }, 
         child: Container(height: 205, width: 50, decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white10, width: 2)), child: Stack(alignment: Alignment.center, children: [Positioned(bottom: _throttleRaw >= 0 ? 100 : 100 + (_throttleRaw * 100), child: Container(width: 50, height: (_throttleRaw.abs() * 100), color: _throttleRaw >= 0 ? Colors.greenAccent.withOpacity(0.3) : Colors.redAccent.withOpacity(0.3))), Container(height: 1, width: 50, color: Colors.white24), Positioned(bottom: 85 + (_throttleRaw * 85), child: Container(width: 46, height: 30, decoration: BoxDecoration(color: _throttleRaw >= 0 ? Colors.greenAccent : Colors.redAccent, borderRadius: BorderRadius.circular(4)), child: const Icon(Icons.unfold_more, color: Colors.black87)))])))]); 
