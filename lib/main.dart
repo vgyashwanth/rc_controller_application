@@ -39,7 +39,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   double _trimValue = 0.0;
   double _currentSpeed = 0.0;
 
-  // --- NEW: Momentum Memory ---
+  // --- Momentum Memory ---
   double _lastPWMBeforeNeutral = 1500.0; 
 
   // --- Steering Config ---
@@ -112,13 +112,14 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
 
       setState(() {
         if (!_isManualThrottlePressed && !_isBraking && _manualModeActive) {
+          // --- FIXED DECAY LOGIC ---
           double decayStep = (15.0 / _dischargeRate).clamp(0.1, 100.0);
-          if (_animatedManualPWM > 1505) {
+          if ((_animatedManualPWM - 1500).abs() <= (decayStep + 1.0)) {
+            _animatedManualPWM = 1500.0; // Snap to neutral to prevent fluctuation
+          } else if (_animatedManualPWM > 1500) {
             _animatedManualPWM -= decayStep;
-          } else if (_animatedManualPWM < 1495) {
+          } else if (_animatedManualPWM < 1500) {
             _animatedManualPWM += decayStep;
-          } else {
-            _animatedManualPWM = 1500;
           }
         }
 
@@ -209,7 +210,6 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   void _releaseManualThrottle() {
     setState(() {
       _isManualThrottlePressed = false;
-      // Capture momentum before releasing manual throttle
       _lastPWMBeforeNeutral = _animatedManualPWM;
       _manualController.removeListener(_updatePWMFromAnimation);
       _manualController.stop(); 
@@ -219,7 +219,6 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   void _startDiscovery() async { _discoverySocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, _discoveryPort); _discoverySocket?.listen((RawSocketEvent event) { if (event == RawSocketEvent.read) { Datagram? dg = _discoverySocket?.receive(); if (dg != null) { String msg = String.fromCharCodes(dg.data); if (msg == "ESP_DISCOVERY") setState(() => _espIP = dg.address.address); } } }); }
   void _setupControlSocket() async { _controlSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0); _controlSocket?.listen((RawSocketEvent event) { if (event == RawSocketEvent.read) { Datagram? dg = _controlSocket?.receive(); if (dg != null) { String response = String.fromCharCodes(dg.data); if (response.startsWith("RSSI:")) { setState(() { _rssi = int.tryParse(response.split(":")[1]) ?? 0; _isConnected = true; }); _connTimeout?.cancel(); _connTimeout = Timer(const Duration(seconds: 3), () { setState(() { _isConnected = false; _rssi = 0; }); }); } } } }); }
   
-  // --- UPDATED PWM LOGIC ---
   double get currentThrottlePWM {
     if (_isBraking) return _brakeOverridePWM.toDouble();
     if (_manualModeActive) return _animatedManualPWM;
@@ -239,8 +238,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
     setState(() { 
       _isBraking = false; 
       _brakeOverridePWM = 1500; 
-      if (_manualModeActive) _animatedManualPWM = 1500; 
-      // Reset the memory after brake is released
+      if (_manualModeActive) _animatedManualPWM = 1500.0; // Reset exactly to neutral
       _lastPWMBeforeNeutral = 1500;
     }); 
   }
@@ -354,7 +352,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
     return Column(children: [
       _buildRectButton(label: "TRIM", active: _showTrimSlider, onTap: () => _togglePanel('trim')), 
       const SizedBox(height: 12), 
-      _buildRectButton(label: "MANUAL", active: _manualModeActive, activeColor: Colors.orangeAccent, onTap: () { setState(() { _manualModeActive = !_manualModeActive; _isReversing = false; _gearStage = 0; _animatedManualPWM = 1500; }); })
+      _buildRectButton(label: "MANUAL", active: _manualModeActive, activeColor: Colors.orangeAccent, onTap: () { setState(() { _manualModeActive = !_manualModeActive; _isReversing = false; _gearStage = 0; _animatedManualPWM = 1500.0; }); })
     ]);
   }
 
@@ -377,7 +375,6 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
     );
   }
 
-  // --- UPDATED BRAKE BUTTON WITH MOMENTUM MEMORY ---
   Widget _buildBrakeAndReverse() {
     return Column(children: [
       if (_manualModeActive) GestureDetector(
@@ -390,21 +387,15 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
           setState(() { 
             _isBraking = true;
             _brakePulseTimer?.cancel();
-            
-            // USE THE MEMORY: _lastPWMBeforeNeutral
             double speedDiff = (_lastPWMBeforeNeutral - 1500).abs();
-            
             if (speedDiff > 30) {
               bool wasMovingForward = _lastPWMBeforeNeutral > 1500;
-              // Map how long to brake based on how fast we were going
               int durationMs = ((speedDiff / 500.0) * _maxBrakeDuration * 1000).toInt(); 
-              
               _brakeOverridePWM = wasMovingForward ? 1000 : 2000;
-              
               _brakePulseTimer = Timer(Duration(milliseconds: durationMs), () { 
                 setState(() { 
                   _brakeOverridePWM = 1500; 
-                  if (_manualModeActive) _animatedManualPWM = 1500;
+                  if (_manualModeActive) _animatedManualPWM = 1500.0;
                 }); 
               });
             } else { 
@@ -507,7 +498,6 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   Widget _buildWheelSteering() { return GestureDetector(onPanStart: (details) { _centeringTicker?.stop(); _lastElapsed = Duration.zero; final box = context.findRenderObject() as RenderBox; final Offset center = box.localToGlobal(Offset(70 + 90, MediaQuery.of(context).size.height - 30 - 90)); final Offset pos = details.globalPosition - center; _lastTouchAngle = atan2(pos.dy, pos.dx); }, onPanUpdate: (details) { final RenderBox box = context.findRenderObject() as RenderBox; final Offset center = box.localToGlobal(Offset(70 + 90, MediaQuery.of(context).size.height - 30 - 90)); final Offset currentPos = details.globalPosition - center; double currentAngle = atan2(currentPos.dy, currentPos.dx); double diff = currentAngle - _lastTouchAngle; if (diff > pi) diff -= 2 * pi; if (diff < -pi) diff += 2 * pi; setState(() { _steeringAngle = (_steeringAngle + (diff * _steeringSensitivity)).clamp(-_maxRotationLimit, _maxRotationLimit); }); _lastTouchAngle = currentAngle; }, onPanEnd: (_) { _centeringTicker?.start(); _lastTouchAngle = 0.0; }, child: Transform.rotate(angle: _steeringAngle, child: SizedBox(width: 180, height: 180, child: Image.asset('images/steering_wheel.png', fit: BoxFit.contain)))); }
   Widget _buildButtonSteering() { bool isLeftPressed = _steeringAngle <= -_maxRotationLimit; bool isRightPressed = _steeringAngle >= _maxRotationLimit; return Row(children: [GestureDetector(onTapDown: (_) { _centeringTicker?.stop(); setState(() => _steeringAngle = -_maxRotationLimit); }, onTapUp: (_) { _lastElapsed = Duration.zero; _centeringTicker?.start(); }, child: Container(width: 85, height: 85, decoration: BoxDecoration(color: isLeftPressed ? Colors.cyanAccent : Colors.cyanAccent.withOpacity(0.1), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.cyanAccent, width: 2)), child: Icon(Icons.arrow_back_ios_new, size: 40, color: isLeftPressed ? Colors.black : Colors.cyanAccent))), const SizedBox(width: 20), GestureDetector(onTapDown: (_) { _centeringTicker?.stop(); setState(() => _steeringAngle = _maxRotationLimit); }, onTapUp: (_) { _lastElapsed = Duration.zero; _centeringTicker?.start(); }, child: Container(width: 85, height: 85, decoration: BoxDecoration(color: isRightPressed ? Colors.cyanAccent : Colors.cyanAccent.withOpacity(0.1), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.cyanAccent, width: 2)), child: Icon(Icons.arrow_forward_ios, size: 40, color: isRightPressed ? Colors.black : Colors.cyanAccent)))]); }
   
-  // --- UPDATED STANDARD THROTTLE: SAVES MOMENTUM ---
   Widget _buildStandardThrottle() { 
     return Row(children: [
       const Column(children: [Text("F", style: TextStyle(color: Colors.greenAccent)), SizedBox(height: 140), Text("R", style: TextStyle(color: Colors.redAccent))]), 
@@ -517,13 +507,11 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
           setState(() { 
             _throttleRaw -= details.delta.dy / 100; 
             _throttleRaw = _throttleRaw.clamp(-1.0, 1.0); 
-            // Save the active PWM into memory as we drive
             _lastPWMBeforeNeutral = (_throttleRaw + 1.0) * 500 + 1000;
           }); 
         }, 
         onVerticalDragEnd: (_) { 
           setState(() {
-            // Keep the memory, but set actual stick to zero
             _throttleRaw = 0.0; 
           });
         }, 
