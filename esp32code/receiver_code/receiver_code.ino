@@ -199,28 +199,36 @@ void Control(DataPacket *rxData)
   if(rxData->headLights)
   {
      if(rxData->headLights == 1)
-     {
-        // Turn on the bar lights
-        digitalWrite(BAR_LIGHTS, HIGH);
-        // Turn off the other lights if already on
+     {  
+
         digitalWrite(HEAD_LIGHTS, LOW);
-        digitalWrite(RED_LIGHTS, LOW);
+        if(rxData->parkingLights == false)
+        {
+          // Turn on the bar lights
+          digitalWrite(BAR_LIGHTS, HIGH);
+          // Turn off the other lights if already on
+          digitalWrite(RED_LIGHTS, LOW);
+        }
      }
      else
      {
         // Turn on all the lights
-        digitalWrite(BAR_LIGHTS, HIGH);
+
         digitalWrite(HEAD_LIGHTS, HIGH);
-        digitalWrite(RED_LIGHTS, HIGH);
+        if(rxData->parkingLights == false)
+        {
+          digitalWrite(RED_LIGHTS, HIGH);
+          digitalWrite(BAR_LIGHTS, HIGH);
+        }
      }
   }
   else 
   {
       // Turn off all the lights, only if the parking lights is off
+      digitalWrite(HEAD_LIGHTS, LOW);
       if(rxData->parkingLights == false)
       {
         digitalWrite(BAR_LIGHTS, LOW);
-        digitalWrite(HEAD_LIGHTS, LOW);
         digitalWrite(RED_LIGHTS, LOW);
       }
   }
