@@ -39,6 +39,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   double _throttleRaw = 0.0; 
   double _trimValue = 0.0;
   double _currentSpeed = 0.0;
+  bool _isSteeringReversed = false; 
 
   // --- Momentum & Timing Memory ---
   double _lastPWMBeforeNeutral = 1500.0; 
@@ -180,6 +181,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
       _centeringSpeed = (prefs.getDouble('center_speed') ?? 20.0).clamp(10.0, 30.0);
       _maxBrakeDuration = prefs.getDouble('max_brake_dur') ?? 0.5;
       _dischargeRate = (prefs.getDouble('momentum_rate') ?? 2.5).clamp(0.1, 5.0);
+      _isSteeringReversed = prefs.getBool('steer_reversed') ?? false;
     });
   }
 
@@ -193,6 +195,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
     await prefs.setDouble('center_speed', _centeringSpeed);
     await prefs.setDouble('max_brake_dur', _maxBrakeDuration);
     await prefs.setDouble('momentum_rate', _dischargeRate);
+    await prefs.setBool('steer_reversed', _isSteeringReversed);
   }
 
   void _gearUp() { if (_gearStage < 5) { setState(() => _gearStage++); if (_isManualThrottlePressed) _engageManualThrottle(); } }
@@ -229,7 +232,8 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
 
   double get servoAngle {
     double center = 90.0 + _trimValue;
-    double normalizedStick = (_steeringAngle / _maxRotationLimit).clamp(-1.0, 1.0);
+    double rawStick = (_steeringAngle / _maxRotationLimit).clamp(-1.0, 1.0);
+    double normalizedStick = _isSteeringReversed ? -rawStick : rawStick;
     return (normalizedStick < 0) ? center + (normalizedStick * (center - _leftLimit)) : center + (normalizedStick * (_rightLimit - center));
   }
   
@@ -386,39 +390,20 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
           setState(() { 
             _isBraking = true;
             _brakePulseTimer?.cancel();
-
-            // --- DYNAMIC WINDOW LOGIC ---
             bool isWithinDynamicWindow = false;
             if (_lastThrottleReleaseTime != null) {
-              // Calculate how fast we were going as a factor of 0.0 to 1.0
               double speedIntensity = (_lastPWMBeforeNeutral - 1500).abs() / 500.0;
-              
-              // Dynamic window: if at 100% speed, window is 3s. If at 10% speed, window is 0.3s.
               double dynamicWindowSeconds = (speedIntensity * 3.0).clamp(0.1, 3.0);
-              
               int elapsedMs = DateTime.now().difference(_lastThrottleReleaseTime!).inMilliseconds;
-              if (elapsedMs < (dynamicWindowSeconds * 1000)) {
-                isWithinDynamicWindow = true;
-              }
+              if (elapsedMs < (dynamicWindowSeconds * 1000)) isWithinDynamicWindow = true;
             }
-
             double speedDiff = (_lastPWMBeforeNeutral - 1500).abs();
-            
-            // Only fire the pulse if we are within the dynamic time window
             if (speedDiff > 30 && isWithinDynamicWindow) {
               bool wasMovingForward = _lastPWMBeforeNeutral > 1500;
               int durationMs = ((speedDiff / 500.0) * _maxBrakeDuration * 1000).toInt(); 
               _brakeOverridePWM = wasMovingForward ? 1000 : 2000;
-              _brakePulseTimer = Timer(Duration(milliseconds: durationMs), () { 
-                setState(() { 
-                  _brakeOverridePWM = 1500; 
-                  if (_manualModeActive) _animatedManualPWM = 1500.0;
-                }); 
-              });
-            } else { 
-              // Window expired or car already basically stopped - don't jerk the car
-              _brakeOverridePWM = 1500; 
-            }
+              _brakePulseTimer = Timer(Duration(milliseconds: durationMs), () { setState(() { _brakeOverridePWM = 1500; if (_manualModeActive) _animatedManualPWM = 1500.0; }); });
+            } else { _brakeOverridePWM = 1500; }
           }); 
         },
         onTapUp: (_) => _stopBrakePulse(),
@@ -440,7 +425,6 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
           Text("${_dischargeRate.toStringAsFixed(1)} (Inertia Intensity)", style: const TextStyle(fontSize: 12, color: Colors.white70)),
           const SizedBox(height: 10),
           Slider(value: _dischargeRate, min: 0.1, max: 5.0, divisions: 49, activeColor: Colors.yellowAccent, onChanged: (val) { setState(() => _dischargeRate = val); _saveSettings(); }),
-          const Text("Lower = More Momentum", style: TextStyle(fontSize: 9, color: Colors.white38)),
         ],
       ),
     );
@@ -454,13 +438,14 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
         onTapDown: (_) { setState(() => _isManualThrottlePressed = true); _engageManualThrottle(); },
         onTapUp: (_) => _releaseManualThrottle(),
         onTapCancel: () => _releaseManualThrottle(),
-        child: Container(height: 205, width: 80, decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(12), border: Border.all(color: _isReversing ? Colors.blueAccent : Colors.orangeAccent, width: 2)), child: Stack(alignment: Alignment.bottomCenter, children: [Container(width: 80, height: 205 * fillPercent, decoration: BoxDecoration(gradient: LinearGradient(colors: _isReversing ? [Colors.blue, Colors.lightBlueAccent] : [Colors.deepOrange, Colors.orangeAccent], begin: Alignment.topCenter, end: Alignment.bottomCenter), borderRadius: BorderRadius.circular(10))), const Center(child: RotatedBox(quarterTurns: 3, child: Text("DRIVE", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white70, letterSpacing: 4))))])),
+        // MATCHED WIDTH TO 50 TO KEEP BRAKE POSITION CONSTANT
+        child: Container(height: 205, width: 50, decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(12), border: Border.all(color: _isReversing ? Colors.blueAccent : Colors.orangeAccent, width: 2)), child: Stack(alignment: Alignment.bottomCenter, children: [Container(width: 50, height: 205 * fillPercent, decoration: BoxDecoration(gradient: LinearGradient(colors: _isReversing ? [Colors.blue, Colors.lightBlueAccent] : [Colors.deepOrange, Colors.orangeAccent], begin: Alignment.topCenter, end: Alignment.bottomCenter), borderRadius: BorderRadius.circular(10))), const Center(child: RotatedBox(quarterTurns: 3, child: Text("DRIVE", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: Colors.white70, letterSpacing: 2))))])),
       ),
-      const SizedBox(width: 15),
+      const SizedBox(width: 10),
       Column(children: [
         _buildGearButton(Icons.add, () => _gearUp(), _isPlusPressed, (v) => _isPlusPressed = v),
         const SizedBox(height: 10),
-        Container(width: 50, height: 40, decoration: BoxDecoration(border: Border.all(color: Colors.white24)), child: Center(child: Text(gearText, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)))),
+        Container(width: 45, height: 35, decoration: BoxDecoration(border: Border.all(color: Colors.white24)), child: Center(child: Text(gearText, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)))),
         const SizedBox(height: 10),
         _buildGearButton(Icons.remove, () => _gearDown(), _isMinusPressed, (v) => _isMinusPressed = v),
       ])
@@ -472,7 +457,7 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
       onTapDown: (_) { setState(() => setPressed(true)); action(); },
       onTapUp: (_) => setState(() => setPressed(false)),
       onTapCancel: () => setState(() => setPressed(false)),
-      child: Container(width: 50, height: 50, decoration: BoxDecoration(color: isPressed ? Colors.orangeAccent : Colors.white12, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.orangeAccent)), child: Icon(icon, color: isPressed ? Colors.black : Colors.orangeAccent)),
+      child: Container(width: 45, height: 45, decoration: BoxDecoration(color: isPressed ? Colors.orangeAccent : Colors.white12, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.orangeAccent)), child: Icon(icon, color: isPressed ? Colors.black : Colors.orangeAccent, size: 18)),
     );
   }
 
@@ -481,7 +466,48 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
   Widget _buildRectButton({required String label, required bool active, required VoidCallback onTap, Color activeColor = Colors.greenAccent}) { return GestureDetector(onTap: onTap, child: Container(width: 80, padding: const EdgeInsets.symmetric(vertical: 8), decoration: BoxDecoration(color: active ? activeColor.withOpacity(0.2) : Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(8), border: Border.all(color: active ? activeColor : Colors.white24, width: 1.5)), child: Center(child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 11))))); }
   Widget _buildCircularButton({IconData? icon, String? label, required bool active, required Color color, required VoidCallback onTap}) { return GestureDetector(onTap: onTap, child: Container(width: 40, height: 40, decoration: BoxDecoration(color: active ? color.withOpacity(0.2) : Colors.white.withOpacity(0.05), shape: BoxShape.circle, border: Border.all(color: active ? color : Colors.white24, width: 1.5)), child: Center(child: icon != null ? Icon(icon, color: active ? color : Colors.white, size: 20) : Text(label ?? "", style: TextStyle(color: active ? color : Colors.white, fontWeight: FontWeight.bold, fontSize: 12))))); }
   Widget _buildTrimPanel() { return Container(width: 320, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.8), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.white10)), child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("STEERING TRIM", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)), Slider(value: _trimValue, min: -15, max: 15, divisions: 300, activeColor: Colors.greenAccent, label: _trimValue.toStringAsFixed(1), onChanged: (val) { setState(() => _trimValue = val); _saveSettings(); }), Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [IconButton(onPressed: () => setState(() { _trimValue = (_trimValue - 0.1).clamp(-15.0, 15.0); _saveSettings(); }), icon: const Icon(Icons.remove, color: Colors.greenAccent)), TextButton(onPressed: () => setState(() { _trimValue = 0.0; _saveSettings(); }), child: const Text("RESET")), IconButton(onPressed: () => setState(() { _trimValue = (_trimValue + 0.1).clamp(-15.0, 15.0); _saveSettings(); }), icon: const Icon(Icons.add, color: Colors.greenAccent))])])); }
-  Widget _buildLimitPanel() { return Container(width: 350, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.black.withOpacity(0.9), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.cyanAccent.withOpacity(0.3))), child: Column(mainAxisSize: MainAxisSize.min, children: [const Text("STEERING LIMITS (EPA)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.cyanAccent)), const SizedBox(height: 10), Text("MAX LEFT: ${_leftLimit.toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12)), Slider(value: _leftLimit, min: 10, max: 85, activeColor: Colors.cyanAccent, onChanged: (val) { setState(() => _leftLimit = val); _saveSettings(); }), Text("MAX RIGHT: ${_rightLimit.toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12)), Slider(value: _rightLimit, min: 95, max: 170, activeColor: Colors.cyanAccent, onChanged: (val) { setState(() => _rightLimit = val); _saveSettings(); })])); }
+  
+  Widget _buildLimitPanel() { 
+    return Container(
+      width: 350, padding: const EdgeInsets.all(20), 
+      decoration: BoxDecoration(color: Colors.black.withOpacity(0.9), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.cyanAccent.withOpacity(0.3))), 
+      child: Column(
+        mainAxisSize: MainAxisSize.min, 
+        children: [
+          const Text("STEERING LIMITS (EPA)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.cyanAccent)), 
+          const SizedBox(height: 15),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _buildLimitTypeButton("POSITIVE EFFECT", !_isSteeringReversed, () => setState(() { _isSteeringReversed = false; _saveSettings(); })),
+              const SizedBox(width: 10),
+              _buildLimitTypeButton("NEGATIVE EFFECT", _isSteeringReversed, () => setState(() { _isSteeringReversed = true; _saveSettings(); })),
+            ],
+          ),
+          const SizedBox(height: 15),
+          Text("MAX LEFT: ${_leftLimit.toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12)), 
+          Slider(value: _leftLimit, min: 10, max: 85, activeColor: Colors.cyanAccent, onChanged: (val) { setState(() => _leftLimit = val); _saveSettings(); }), 
+          Text("MAX RIGHT: ${_rightLimit.toStringAsFixed(0)}°", style: const TextStyle(fontSize: 12)), 
+          Slider(value: _rightLimit, min: 95, max: 170, activeColor: Colors.cyanAccent, onChanged: (val) { setState(() => _rightLimit = val); _saveSettings(); })
+        ]
+      )
+    ); 
+  }
+
+  Widget _buildLimitTypeButton(String label, bool active, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: active ? Colors.cyanAccent : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: Colors.cyanAccent),
+        ),
+        child: Text(label, style: TextStyle(color: active ? Colors.black : Colors.cyanAccent, fontSize: 9, fontWeight: FontWeight.bold)),
+      ),
+    );
+  }
   
   Widget _buildParamPanel() {
     const double oneDegInRad = 0.0174533;
@@ -521,19 +547,8 @@ class _ControlScreenState extends State<ControlScreen> with TickerProviderStateM
       const Column(children: [Text("F", style: TextStyle(color: Colors.greenAccent)), SizedBox(height: 140), Text("R", style: TextStyle(color: Colors.redAccent))]), 
       const SizedBox(width: 15), 
       GestureDetector(
-        onVerticalDragUpdate: (details) { 
-          setState(() { 
-            _throttleRaw -= details.delta.dy / 100; 
-            _throttleRaw = _throttleRaw.clamp(-1.0, 1.0); 
-            _lastPWMBeforeNeutral = (_throttleRaw + 1.0) * 500 + 1000;
-          }); 
-        }, 
-        onVerticalDragEnd: (_) { 
-          setState(() {
-            _throttleRaw = 0.0; 
-            _lastThrottleReleaseTime = DateTime.now(); 
-          });
-        }, 
+        onVerticalDragUpdate: (details) { setState(() { _throttleRaw -= details.delta.dy / 100; _throttleRaw = _throttleRaw.clamp(-1.0, 1.0); _lastPWMBeforeNeutral = (_throttleRaw + 1.0) * 500 + 1000; }); }, 
+        onVerticalDragEnd: (_) { setState(() { _throttleRaw = 0.0; _lastThrottleReleaseTime = DateTime.now(); }); }, 
         child: Container(height: 205, width: 50, decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white10, width: 2)), child: Stack(alignment: Alignment.center, children: [Positioned(bottom: _throttleRaw >= 0 ? 100 : 100 + (_throttleRaw * 100), child: Container(width: 50, height: (_throttleRaw.abs() * 100), color: _throttleRaw >= 0 ? Colors.greenAccent.withOpacity(0.3) : Colors.redAccent.withOpacity(0.3))), Container(height: 1, width: 50, color: Colors.white24), Positioned(bottom: 85 + (_throttleRaw * 85), child: Container(width: 46, height: 30, decoration: BoxDecoration(color: _throttleRaw >= 0 ? Colors.greenAccent : Colors.redAccent, borderRadius: BorderRadius.circular(4)), child: const Icon(Icons.unfold_more, color: Colors.black87)))])))]); 
   }
 
